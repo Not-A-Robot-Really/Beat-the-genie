@@ -30,17 +30,35 @@ safe version of "default key" is a tiny serverless proxy (Cloudflare
 Worker / Netlify Function / Vercel Edge Function) that holds the key
 server-side and this page calls instead — left as a TODO below.
 
-LEADERBOARD (FIXED)
+LEADERBOARD
 
-Scores are now stored in window.storage (shared persistent KV),
-which works on any static host with no tokens, no backend, and no
-manual data.json merging. fetchSeedLeaderboard() reads shared storage
-and merges in the data.json seeds; submitToSharedStorage() writes
-directly to shared storage so all visitors see each other's entries.
+Each visitor's completed games are kept in their own browser's localStorage,
+so they always see their own runs instantly. The shared leaderboard itself
+lives in data.json in this repo, and is rendered by reading that file
+straight from GitHub on page load.
 
-The old GitHub PAT approach (GITHUB_TOKEN hardcoded in JS) has been
-removed — embedding write-access tokens in public HTML is a security
-risk and GitHub revokes them automatically anyway.
+⚠️ ABOUT GITHUB_TOKEN — READ BEFORE YOU SET IT
+
+If you fill in GITHUB_TOKEN below, "Submit to leaderboard" commits the new
+entry directly into data.json via the GitHub Contents API — no manual
+copy-pasting or merging needed. But exactly like DEFAULT_API_KEYS above,
+this token ships in plain text to every visitor's browser and is visible to
+anyone who views source, opens devtools, or clones the repo.
+
+Anyone who finds it can do whatever that token is scoped to do. To keep the
+blast radius small:
+  - Use a FINE-GRAINED personal access token (github.com/settings/tokens
+    -> "Fine-grained tokens"), never a classic token.
+  - Scope it to ONLY this one repository.
+  - Grant ONLY the "Contents: Read and write" repository permission and
+    nothing else (no admin, no workflows, no other repos).
+  - Give it a real expiration date and rotate it periodically.
+  - Treat it as disposable — if you ever see commits you didn't make,
+    revoke it immediately from the tokens page.
+
+Leave GITHUB_TOKEN as "" to disable direct writes — submissions will then
+only be saved in the visitor's own browser, with no shared leaderboard
+update (and the modal will say so).
 -->
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -453,6 +471,16 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
 .modal select{ font-family:'Space Grotesk', sans-serif;}
 .key-row{display:flex; gap:8px;}
 .key-row input{flex:1;}
+/* Site-default keys are pre-filled so visitors can see one is linked, but
+   blurred so the raw key isn't legible at a glance (e.g. in a screenshot).
+   Clicking in selects the text so typing a key of your own replaces it. */
+.key-row input.api-key-blurred{
+  filter:blur(5px);
+  transition:filter .15s ease;
+}
+.default-key-note{
+  font-size:11px; color:var(--text-dim); opacity:.8; margin:-10px 0 14px; line-height:1.4;
+}
 .show-key{
   background:var(--bg-deep); border:1px solid var(--line); color:var(--text-dim);
   border-radius:10px; padding:0 12px; cursor:pointer; font-size:12px;
@@ -621,6 +649,7 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
       <input type="password" id="apiKeyInput" placeholder="Paste your API key here">
       <button class="show-key" id="toggleKeyVisibility" type="button">show</button>
     </div>
+    <p class="default-key-note" id="defaultKeyNote" hidden>This field is pre-filled with the site's shared key (blurred on purpose). Click in and start typing to use your own key instead.</p>
     <div id="customEndpointWrap" hidden>
       <label for="customEndpointInput">API Endpoint URL</label>
       <input type="text" id="customEndpointInput" placeholder="https://your-provider.com/v1/chat/completions">
@@ -644,7 +673,7 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
 <div class="modal-overlay" id="submitOverlay" hidden>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="submitTitle">
     <h2 id="submitTitle">Submit to leaderboard</h2>
-    <p class="modal-sub" id="submitModalSub">Your score will be saved to the shared leaderboard so other visitors can see it. Your wishes are visible to anyone who reads the leaderboard.</p>
+    <p class="modal-sub" id="submitModalSub">Your score will be committed to this site's leaderboard on GitHub so other visitors can see it. Your wishes are visible to anyone who reads the leaderboard.</p>
     <div id="submitStatus" style="display:none; text-align:center; padding:14px; font-family:'IBM Plex Mono',monospace; font-size:13px; border-radius:10px; margin-bottom:12px;"></div>
     <div class="modal-actions" id="submitActionBtns">
       <button class="save-btn" id="confirmSubmitBtn">Yes, add me to the board</button>
@@ -664,12 +693,16 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
   /* ---------------- constants ---------------- */
   var MAX_WISHES = 3;
 
-  // Set this to "owner/repo" to enable the "Open GitHub Issue" button.
+  // "owner/repo" that this page reads/writes the shared leaderboard in.
   var GITHUB_REPO = "Not-A-Robot-Really/Beat-the-genie";
+  var GITHUB_BRANCH = "main";
+  var GITHUB_DATA_PATH = "data.json";
 
-  // Shared leaderboard storage key prefix (window.storage KV)
-  var LB_STORAGE_PREFIX = "lb:";
-  var LB_STORAGE_INDEX_KEY = "lb-index";
+  // ⚠️ See the big warning comment at the top of this file before setting
+  // this. A fine-grained PAT scoped to ONLY this repo, with ONLY the
+  // "Contents: Read and write" permission. Leave "" to disable direct
+  // writes (submissions then stay local-only, per visitor).
+  var GITHUB_TOKEN = "";
 
   // OPTIONAL "default" key so visitors don't have to bring their own.
   // ⚠️ This is a public static file — anyone who views source can see this key.
@@ -727,16 +760,26 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
       consoleUrl: "https://openrouter.ai/keys",
       consoleLabel: "openrouter.ai/keys",
       corsNote: null,
-      defaultModel: "anthropic/claude-sonnet-4-5:beta",
+      defaultModel: "openrouter/free",
       endpoint: "https://openrouter.ai/api/v1/chat/completions",
       callType: "openai_compat",
+      // The site's default OpenRouter key is a free-tier key (no billing set up),
+      // so it can ONLY call models that cost $0 — anything without `free:true`
+      // below will fail with a 402/insufficient-credits error on that key.
+      // "openrouter/free" is OpenRouter's own router that always resolves to
+      // *some* free model, so it stays correct even as the exact free roster
+      // rotates. The paid entries are left in for visitors who paste their
+      // own key with billing enabled.
       models: [
-        { id: "anthropic/claude-sonnet-4-5:beta", label: "Claude Sonnet 4.5 (via OpenRouter) — recommended" },
-        { id: "anthropic/claude-haiku-4-5:beta", label: "Claude Haiku 4.5 (via OpenRouter) — fast/cheap" },
-        { id: "openai/gpt-4o", label: "GPT-4o (via OpenRouter)" },
-        { id: "openai/gpt-4o-mini", label: "GPT-4o Mini (via OpenRouter)" },
-        { id: "google/gemini-2.0-flash-001", label: "Gemini 2.0 Flash (via OpenRouter)" },
-        { id: "meta-llama/llama-3.3-70b-instruct", label: "Llama 3.3 70B (via OpenRouter)" },
+        { id: "openrouter/free", label: "Auto — any free model (recommended)", free: true },
+        { id: "meta-llama/llama-3.3-70b-instruct:free", label: "Llama 3.3 70B — free", free: true },
+        { id: "nvidia/nemotron-nano-12b-v2-vl:free", label: "Nemotron Nano 12B VL — free", free: true },
+        { id: "qwen/qwen-2.5-7b-instruct:free", label: "Qwen 2.5 7B Instruct — free", free: true },
+        { id: "anthropic/claude-sonnet-4-5:beta", label: "Claude Sonnet 4.5 (via OpenRouter) — paid, needs your own key" },
+        { id: "anthropic/claude-haiku-4-5:beta", label: "Claude Haiku 4.5 (via OpenRouter) — paid, needs your own key" },
+        { id: "openai/gpt-4o", label: "GPT-4o (via OpenRouter) — paid, needs your own key" },
+        { id: "openai/gpt-4o-mini", label: "GPT-4o Mini (via OpenRouter) — paid, needs your own key" },
+        { id: "google/gemini-2.0-flash-001", label: "Gemini 2.0 Flash (via OpenRouter) — paid, needs your own key" },
         { id: "custom", label: "→ Enter custom model name below" }
       ]
     },
@@ -1087,11 +1130,24 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
   }
 
   /* ---------------- settings modal ---------------- */
-  function populateModelOptions(providerId){
+  var lastPopulatedModels = []; // the model list actually rendered into modelSelect, post-filtering
+
+  function populateModelOptions(providerId, freeOnly){
     var provider = PROVIDERS[providerId];
     modelSelect.innerHTML = "";
+    lastPopulatedModels = [];
     if (!provider) return;
-    provider.models.forEach(function(m){
+
+    var list = provider.models;
+    if (freeOnly) {
+      var filtered = list.filter(function(m){ return m.free === true; });
+      // Safety net: never render an empty dropdown even if a future edit
+      // removes all free entries — fall back to the unfiltered list.
+      if (filtered.length) list = filtered;
+    }
+    lastPopulatedModels = list;
+
+    list.forEach(function(m){
       var opt = document.createElement("option");
       opt.value = m.id;
       opt.textContent = m.label;
@@ -1104,20 +1160,40 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
     if (!provider) return;
 
     apiKeyLabel.textContent = provider.keyLabel;
-    apiKeyInput.value = getKeyStore()[providerId] || "";
+    var ownKey = getKeyStore()[providerId] || "";
+    var hasDefaultKey = !!DEFAULT_API_KEYS[providerId];
+    var defaultKeyNote = $("defaultKeyNote");
 
-    if (DEFAULT_API_KEYS[providerId] && !apiKeyInput.value) {
-      apiKeyInput.placeholder = "(using site default key — paste your own to override)";
-    } else {
+    if (ownKey) {
+      // Visitor has their own key on file for this provider — show it plainly.
+      apiKeyInput.value = ownKey;
+      apiKeyInput.classList.remove("api-key-blurred");
       apiKeyInput.placeholder = provider.keyPlaceholder;
+      if (defaultKeyNote) defaultKeyNote.hidden = true;
+    } else if (hasDefaultKey) {
+      // No visitor key yet — pre-fill the field with the real site default key
+      // so it's visibly "linked", but blur it so it isn't legible at a glance.
+      apiKeyInput.value = DEFAULT_API_KEYS[providerId];
+      apiKeyInput.classList.add("api-key-blurred");
+      apiKeyInput.placeholder = provider.keyPlaceholder;
+      if (defaultKeyNote) defaultKeyNote.hidden = false;
+    } else {
+      apiKeyInput.value = "";
+      apiKeyInput.classList.remove("api-key-blurred");
+      apiKeyInput.placeholder = provider.keyPlaceholder;
+      if (defaultKeyNote) defaultKeyNote.hidden = true;
     }
 
-    populateModelOptions(providerId);
+    // The site's default OpenRouter key is a free-tier key — restrict the
+    // model picker to free models whenever that's the key actually in use.
+    var freeOnly = (providerId === "openrouter") && !ownKey && hasDefaultKey;
+    populateModelOptions(providerId, freeOnly);
+
     var storedModel = getModel(providerId);
     if (modelSelect.querySelector('option[value="' + storedModel + '"]')) {
       modelSelect.value = storedModel;
-    } else {
-      modelSelect.value = provider.models[0].id;
+    } else if (lastPopulatedModels.length) {
+      modelSelect.value = lastPopulatedModels[0].id;
     }
 
     // Show/hide custom model field
@@ -1140,6 +1216,31 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
       corsWarn.hidden = true;
     }
   }
+
+  // Typing into the key field means the visitor is entering their own key —
+  // stop blurring immediately and, for OpenRouter, unlock the full (paid)
+  // model list since their own key may have real credits behind it.
+  apiKeyInput.addEventListener("input", function(){
+    apiKeyInput.classList.remove("api-key-blurred");
+    var defaultKeyNote = $("defaultKeyNote");
+    if (defaultKeyNote) defaultKeyNote.hidden = true;
+    var providerId = providerSelect.value;
+    if (providerId === "openrouter") {
+      var storedModel = modelSelect.value;
+      populateModelOptions(providerId, false);
+      if (modelSelect.querySelector('option[value="' + storedModel + '"]')) {
+        modelSelect.value = storedModel;
+      }
+    }
+  });
+
+  // Clicking into a blurred (site-default) key selects all of it, so the
+  // visitor can just start typing to replace it with their own key.
+  apiKeyInput.addEventListener("focus", function(){
+    if (apiKeyInput.classList.contains("api-key-blurred")) {
+      apiKeyInput.select();
+    }
+  });
 
   modelSelect.addEventListener("change", function(){
     var needsCustom = (modelSelect.value === "custom");
@@ -1174,10 +1275,11 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
     if (siteDefaultSel) siteDefaultSel.value = "";
   });
 
-  // Cheapest model to pre-select when using a site default key
+  // Model to pre-select when using a site default key. The OpenRouter entry
+  // MUST be a free model — the site's OpenRouter key is a free-tier key.
   var DEFAULT_CHEAP_MODELS = {
     groq: "llama-3.1-8b-instant",
-    openrouter: "anthropic/claude-haiku-4-5:beta",
+    openrouter: "openrouter/free",
     gemini: "gemini-2.0-flash-lite"
   };
 
@@ -1190,11 +1292,20 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
       // Switch provider and populate its fields
       providerSelect.value = val;
       applyProviderToModal(val);
-      // Fill in the actual default key so the user can see it
+      // Fill in the actual default key so the visitor can see it's linked —
+      // blurred on purpose, even if they had a personal key saved before.
       apiKeyInput.value = DEFAULT_API_KEYS[val] || "";
       apiKeyInput.type = "password";
+      apiKeyInput.classList.add("api-key-blurred");
       $("toggleKeyVisibility").textContent = "show";
-      // Select the cheapest model
+      var defaultKeyNote = $("defaultKeyNote");
+      if (defaultKeyNote) defaultKeyNote.hidden = false;
+      // The shared OpenRouter key is free-tier only — lock the model picker
+      // down to free models regardless of what was previously selected.
+      if (val === "openrouter") {
+        populateModelOptions(val, true);
+      }
+      // Select the recommended (and, for OpenRouter, guaranteed-free) model
       var cheapModel = DEFAULT_CHEAP_MODELS[val];
       if (cheapModel && modelSelect.querySelector('option[value="' + cheapModel + '"]')) {
         modelSelect.value = cheapModel;
@@ -1365,6 +1476,18 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
     });
   }
 
+  // Is this OpenRouter model one of the ones flagged free:true above
+  // (or the always-free "openrouter/free" router)?
+  function isFreeOpenRouterModel(modelId){
+    if (modelId === "openrouter/free") return true;
+    if (/:free$/.test(modelId)) return true;
+    var models = PROVIDERS.openrouter.models;
+    for (var i = 0; i < models.length; i++) {
+      if (models[i].id === modelId) return models[i].free === true;
+    }
+    return false;
+  }
+
   function callGenie(wishText){
     var providerId = getProvider();
     var apiKey = getApiKey(providerId);
@@ -1372,6 +1495,12 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
     // If model is "custom", resolve to the custom model name
     if (modelId === "custom") {
       modelId = getCustomModel(providerId) || "gpt-4o";
+    }
+    // Belt-and-suspenders: even if a paid model got saved before this fix
+    // (or via the customModel field), never send it on the shared free-tier
+    // OpenRouter key — force the guaranteed-free router instead.
+    if (providerId === "openrouter" && isUsingDefaultKey(providerId) && !isFreeOpenRouterModel(modelId)) {
+      modelId = "openrouter/free";
     }
     var provider = PROVIDERS[providerId] || PROVIDERS.groq;
     var callType = provider.callType || "openai_compat";
@@ -1600,59 +1729,31 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
     renderLeaderboard();
   }
 
-  /* ---------------- leaderboard ---------------- */
-  /* ---------------- leaderboard — persistent shared storage ---------------- */
-  // Uses window.storage (shared KV, persists across sessions, visible to all
-  // users). Falls back gracefully if the API is unavailable.
-  //
-  // Storage layout:
-  //   lb-index   (shared) → JSON array of entry IDs, newest first
-  //   lb:<id>    (shared) → JSON entry object
-
-  function storageAvailable(){
-    return typeof window !== "undefined" && window.storage &&
-      typeof window.storage.get === "function";
-  }
+  /* ---------------- leaderboard — read from GitHub ---------------- */
+  // The shared leaderboard is just data.json in the repo. Read it straight
+  // from the raw GitHub CDN (public, no token needed, cache-busted) on
+  // every page load / refresh.
 
   function fetchSeedLeaderboard(){
-    lbLoading.hidden = false;
-
-    var sharedPromise = storageAvailable()
-      ? (async function(){
-          var sharedEntries = [];
-          try {
-            var indexResult = await window.storage.get(LB_STORAGE_INDEX_KEY, true);
-            var ids = JSON.parse(indexResult.value || "[]");
-            var fetched = await Promise.all(ids.map(function(id){
-              return window.storage.get(LB_STORAGE_PREFIX + id, true)
-                .then(function(r){ return r ? JSON.parse(r.value) : null; })
-                .catch(function(){ return null; });
-            }));
-            sharedEntries = fetched.filter(Boolean);
-          } catch(e) {}
-          return sharedEntries;
-        })()
-      : Promise.resolve([]);
-
-    var seedPromise = fetch("data.json?_=" + Date.now())
-      .then(function(r){ return r.ok ? r.json() : []; })
-      .catch(function(){ return []; });
-
-    Promise.all([sharedPromise, seedPromise]).then(function(results){
-      var sharedEntries = results[0];
-      var seeds = Array.isArray(results[1]) ? results[1] : [];
-      // Merge: shared storage wins over seeds (dedupe by id)
-      var seen = {};
-      var merged = [];
-      sharedEntries.concat(seeds).forEach(function(e){
-        if (e && e.id && !seen[e.id]) { seen[e.id] = true; merged.push(e); }
-      });
-      seedLeaderboard = merged;
+    if (!GITHUB_REPO) {
       lbLoading.hidden = true;
       renderLeaderboard();
-    }).catch(function(){
-      lbLoading.hidden = true;
-    });
+      return;
+    }
+    lbLoading.hidden = false;
+    var url = "https://raw.githubusercontent.com/" + GITHUB_REPO + "/" + GITHUB_BRANCH + "/" + GITHUB_DATA_PATH + "?_=" + Date.now();
+    fetch(url)
+      .then(function(r){ return r.ok ? r.json() : []; })
+      .then(function(seeds){
+        seedLeaderboard = Array.isArray(seeds) ? seeds : [];
+      })
+      .catch(function(){
+        seedLeaderboard = [];
+      })
+      .then(function(){
+        lbLoading.hidden = true;
+        renderLeaderboard();
+      });
   }
 
   function renderLeaderboard(){
@@ -1687,34 +1788,99 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
     });
   }
 
-  /* ---------------- leaderboard: shared storage submit ---------------- */
+  /* ---------------- leaderboard — commit to GitHub ---------------- */
+  // UTF-8-safe base64 helpers (plain btoa/atob only handle Latin-1, and
+  // wishes/outcomes can contain emoji, smart quotes, etc.)
+  function utf8ToBase64(str){
+    return btoa(unescape(encodeURIComponent(str)));
+  }
+  function base64ToUtf8(str){
+    return decodeURIComponent(escape(atob(str.replace(/\s/g, ""))));
+  }
 
-  async function submitToSharedStorage(entry){
-    // Always save locally first
-    var existing = localLeaderboard.filter(function(e){ return e.id !== entry.id; });
-    existing.unshift(entry);
-    localLeaderboard = existing;
-    localStorage.setItem("genie_leaderboard", JSON.stringify(localLeaderboard));
+  function githubApiHeaders(){
+    return {
+      "Accept": "application/vnd.github+json",
+      "Authorization": "Bearer " + GITHUB_TOKEN,
+      "X-GitHub-Api-Version": "2022-11-28"
+    };
+  }
 
-    if (!storageAvailable()) {
-      throw new Error("Shared storage is not available in this environment. Your score has been saved locally.");
+  // GETs the current data.json straight from the API (not the raw CDN) so
+  // we get back the blob `sha` GitHub requires to commit an update, and so
+  // an authenticated request isn't served stale from cache.
+  function fetchDataJsonForWrite(){
+    var url = "https://api.github.com/repos/" + GITHUB_REPO + "/contents/" + GITHUB_DATA_PATH + "?ref=" + encodeURIComponent(GITHUB_BRANCH);
+    return fetch(url, { headers: githubApiHeaders() }).then(function(res){
+      if (!res.ok) {
+        return res.json().catch(function(){ return {}; }).then(function(body){
+          var err = new Error((body && body.message) || ("GitHub returned HTTP " + res.status));
+          err.status = res.status;
+          throw err;
+        });
+      }
+      return res.json();
+    }).then(function(file){
+      var list = [];
+      try { list = JSON.parse(base64ToUtf8(file.content || "")); } catch(e) { list = []; }
+      if (!Array.isArray(list)) list = [];
+      return { list: list, sha: file.sha };
+    });
+  }
+
+  function commitDataJson(list, sha, message){
+    var url = "https://api.github.com/repos/" + GITHUB_REPO + "/contents/" + GITHUB_DATA_PATH;
+    var body = {
+      message: message,
+      content: utf8ToBase64(JSON.stringify(list, null, 2)),
+      sha: sha,
+      branch: GITHUB_BRANCH
+    };
+    return fetch(url, {
+      method: "PUT",
+      headers: Object.assign({ "content-type": "application/json" }, githubApiHeaders()),
+      body: JSON.stringify(body)
+    }).then(function(res){
+      if (!res.ok) {
+        return res.json().catch(function(){ return {}; }).then(function(errBody){
+          var err = new Error((errBody && errBody.message) || ("GitHub returned HTTP " + res.status));
+          err.status = res.status;
+          throw err;
+        });
+      }
+      return res.json();
+    });
+  }
+
+  // Reads data.json, prepends the new entry (replacing any earlier entry
+  // with the same id), caps the file at 200 entries, and commits it back.
+  // Retries a couple of times on 409 (someone else committed data.json in
+  // between our GET and PUT) by simply re-fetching the latest sha.
+  async function submitToGitHub(entry){
+    if (!GITHUB_TOKEN) {
+      throw new Error("No GitHub token configured for this site — ask the site owner to set GITHUB_TOKEN. Your score is saved locally on this device only.");
+    }
+    if (!GITHUB_REPO) {
+      throw new Error("No GitHub repo configured (GITHUB_REPO is blank).");
     }
 
-    // Write entry to shared storage
-    await window.storage.set(LB_STORAGE_PREFIX + entry.id, JSON.stringify(entry), true);
-
-    // Update the shared index
-    var currentIndex = [];
-    try {
-      var idxResult = await window.storage.get(LB_STORAGE_INDEX_KEY, true);
-      currentIndex = JSON.parse(idxResult.value || "[]");
-    } catch(e) { currentIndex = []; }
-
-    if (!currentIndex.includes(entry.id)) {
-      currentIndex.unshift(entry.id);
-      if (currentIndex.length > 200) currentIndex = currentIndex.slice(0, 200);
+    var attempts = 0;
+    var maxAttempts = 3;
+    while (attempts < maxAttempts) {
+      attempts++;
+      try {
+        var current = await fetchDataJsonForWrite();
+        var list = current.list.filter(function(e){ return e && e.id !== entry.id; });
+        list.unshift(entry);
+        if (list.length > 200) list = list.slice(0, 200);
+        await commitDataJson(list, current.sha, "Add leaderboard entry: " + entry.name + " (" + entry.score + ")");
+        return;
+      } catch (err) {
+        var canRetry = err && err.status === 409 && attempts < maxAttempts;
+        if (!canRetry) throw err;
+        // fall through and loop again with a fresh GET
+      }
     }
-    await window.storage.set(LB_STORAGE_INDEX_KEY, JSON.stringify(currentIndex), true);
   }
 
   function openSubmitModal(avgScore){
@@ -1735,6 +1901,13 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
     };
     lastEntryId = entry.id;
 
+    // Save locally first, regardless of whether the GitHub commit below
+    // succeeds — the visitor should always see their own entry on this device.
+    var existingLocal = localLeaderboard.filter(function(e){ return e.id !== entry.id; });
+    existingLocal.unshift(entry);
+    localLeaderboard = existingLocal;
+    localStorage.setItem("genie_leaderboard", JSON.stringify(localLeaderboard));
+
     var statusEl = $("submitStatus");
     var actionBtns = $("submitActionBtns");
     var subEl = $("submitModalSub");
@@ -1743,7 +1916,7 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
     statusEl.style.display = "none";
     statusEl.textContent = "";
     actionBtns.hidden = false;
-    subEl.textContent = "Your score of " + avgScore + " will be saved to the shared leaderboard so all visitors can see it.";
+    subEl.textContent = "Your score of " + avgScore + " will be committed to this site's leaderboard on GitHub so all visitors can see it.";
 
     submitOverlay.hidden = false;
 
@@ -1752,13 +1925,13 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
       $("confirmSubmitBtn").textContent = "Saving…";
 
       try {
-        await submitToSharedStorage(entry);
+        await submitToGitHub(entry);
         actionBtns.hidden = true;
         statusEl.style.display = "block";
         statusEl.style.color = "var(--glitch)";
         statusEl.style.background = "rgba(92,230,160,0.08)";
         statusEl.style.border = "1px solid var(--glitch-dim)";
-        statusEl.innerHTML = '<div style="font-size:28px;margin-bottom:8px;">✅</div>Score saved to the shared leaderboard!';
+        statusEl.innerHTML = '<div style="font-size:28px;margin-bottom:8px;">✅</div>Score committed to the shared leaderboard!';
         subEl.textContent = "Other visitors will now see your entry.";
         // Refresh leaderboard in background
         fetchSeedLeaderboard();
@@ -1772,7 +1945,8 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
         statusEl.style.border = "1px solid var(--danger-dim)";
         statusEl.innerHTML = '<div style="font-size:28px;margin-bottom:8px;">⚠️</div>' +
           (err && err.message ? escapeHtml(err.message) : "Save failed.") +
-          '<br><span style="font-size:11px;color:var(--text-dim)">Your score is saved locally in your browser.</span>';
+          '<br><span style="font-size:11px;color:var(--text-dim)">Your score is saved locally in your browser either way.</span>';
+        renderLeaderboard();
       }
     };
 
@@ -1801,5 +1975,5 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
 </script>
 </body>
 </html>
-index - 2026-06-28T191254.840.html
-Displaying index - 2026-06-28T191254.840.html.
+index - 2026-06-28T195429.231.html
+Displaying index - 2026-06-28T195429.231.html.
