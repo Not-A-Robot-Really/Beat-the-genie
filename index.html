@@ -30,17 +30,17 @@ safe version of "default key" is a tiny serverless proxy (Cloudflare
 Worker / Netlify Function / Vercel Edge Function) that holds the key
 server-side and this page calls instead — left as a TODO below.
 
-LEADERBOARD
+LEADERBOARD (FIXED)
 
-Scores + wishes are stored in data.json, loaded at page start and
-merged with whatever's in the visitor's own localStorage. A static
-GitHub Pages site can't write back to a file in its own repo, so
-there's no fully-automatic global leaderboard without a backend.
-Instead, "Submit to leaderboard" opens a pre-filled GitHub Issue on
-GITHUB_REPO (set the constant below) with the entry's JSON in the
-body — the repo owner copies accepted entries into data.json and
-commits. Swap in a real backend (Cloudflare KV, a Google Sheet via
-Apps Script, Supabase, etc.) if you want it fully automatic.
+Scores are now stored in window.storage (shared persistent KV),
+which works on any static host with no tokens, no backend, and no
+manual data.json merging. fetchSeedLeaderboard() reads shared storage
+and merges in the data.json seeds; submitToSharedStorage() writes
+directly to shared storage so all visitors see each other's entries.
+
+The old GitHub PAT approach (GITHUB_TOKEN hardcoded in JS) has been
+removed — embedding write-access tokens in public HTML is a security
+risk and GitHub revokes them automatically anyway.
 -->
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -644,13 +644,11 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
 <div class="modal-overlay" id="submitOverlay" hidden>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="submitTitle">
     <h2 id="submitTitle">Submit to leaderboard</h2>
-    <p class="modal-sub" id="submitModalSub">Saving your score to the global leaderboard…</p>
-    <div id="submitStatus" style="text-align:center; padding:18px 0; font-family:'IBM Plex Mono',monospace; font-size:13px; color:var(--text-dim);">
-      <div class="spinner" style="width:26px;height:26px;margin:0 auto 14px;border-radius:50%;border:3px solid var(--line);border-top-color:var(--glitch);animation:spin .9s linear infinite;"></div>
-      Contacting the lamp's record-keeper…
-    </div>
-    <div class="modal-actions" style="margin-top:8px;">
-      <button class="close-btn" id="closeSubmit" style="flex:1;">Close</button>
+    <p class="modal-sub" id="submitModalSub">Your score will be saved to the shared leaderboard so other visitors can see it. Your wishes are visible to anyone who reads the leaderboard.</p>
+    <div id="submitStatus" style="display:none; text-align:center; padding:14px; font-family:'IBM Plex Mono',monospace; font-size:13px; border-radius:10px; margin-bottom:12px;"></div>
+    <div class="modal-actions" id="submitActionBtns">
+      <button class="save-btn" id="confirmSubmitBtn">Yes, add me to the board</button>
+      <button class="close-btn" id="closeSubmit">Keep it local</button>
     </div>
   </div>
 </div>
@@ -668,6 +666,10 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
 
   // Set this to "owner/repo" to enable the "Open GitHub Issue" button.
   var GITHUB_REPO = "Not-A-Robot-Really/Beat-the-genie";
+
+  // Shared leaderboard storage key prefix (window.storage KV)
+  var LB_STORAGE_PREFIX = "lb:";
+  var LB_STORAGE_INDEX_KEY = "lb-index";
 
   // OPTIONAL "default" key so visitors don't have to bring their own.
   // ⚠️ This is a public static file — anyone who views source can see this key.
@@ -1599,18 +1601,58 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
   }
 
   /* ---------------- leaderboard ---------------- */
+  /* ---------------- leaderboard — persistent shared storage ---------------- */
+  // Uses window.storage (shared KV, persists across sessions, visible to all
+  // users). Falls back gracefully if the API is unavailable.
+  //
+  // Storage layout:
+  //   lb-index   (shared) → JSON array of entry IDs, newest first
+  //   lb:<id>    (shared) → JSON entry object
+
+  function storageAvailable(){
+    return typeof window !== "undefined" && window.storage &&
+      typeof window.storage.get === "function";
+  }
+
   function fetchSeedLeaderboard(){
     lbLoading.hidden = false;
-    fetch("data.json?_=" + Date.now())
+
+    var sharedPromise = storageAvailable()
+      ? (async function(){
+          var sharedEntries = [];
+          try {
+            var indexResult = await window.storage.get(LB_STORAGE_INDEX_KEY, true);
+            var ids = JSON.parse(indexResult.value || "[]");
+            var fetched = await Promise.all(ids.map(function(id){
+              return window.storage.get(LB_STORAGE_PREFIX + id, true)
+                .then(function(r){ return r ? JSON.parse(r.value) : null; })
+                .catch(function(){ return null; });
+            }));
+            sharedEntries = fetched.filter(Boolean);
+          } catch(e) {}
+          return sharedEntries;
+        })()
+      : Promise.resolve([]);
+
+    var seedPromise = fetch("data.json?_=" + Date.now())
       .then(function(r){ return r.ok ? r.json() : []; })
-      .then(function(data){
-        seedLeaderboard = Array.isArray(data) ? data : [];
-        lbLoading.hidden = true;
-        renderLeaderboard();
-      })
-      .catch(function(){
-        lbLoading.hidden = true;
+      .catch(function(){ return []; });
+
+    Promise.all([sharedPromise, seedPromise]).then(function(results){
+      var sharedEntries = results[0];
+      var seeds = Array.isArray(results[1]) ? results[1] : [];
+      // Merge: shared storage wins over seeds (dedupe by id)
+      var seen = {};
+      var merged = [];
+      sharedEntries.concat(seeds).forEach(function(e){
+        if (e && e.id && !seen[e.id]) { seen[e.id] = true; merged.push(e); }
       });
+      seedLeaderboard = merged;
+      lbLoading.hidden = true;
+      renderLeaderboard();
+    }).catch(function(){
+      lbLoading.hidden = true;
+    });
   }
 
   function renderLeaderboard(){
@@ -1645,57 +1687,34 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
     });
   }
 
-  /* ---------------- leaderboard: GitHub API submit ---------------- */
-  var GITHUB_TOKEN = "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";
-  var GITHUB_DATA_PATH = "data.json";
+  /* ---------------- leaderboard: shared storage submit ---------------- */
 
-  function submitToGitHub(entry) {
-    var apiBase = "https://api.github.com/repos/" + GITHUB_REPO + "/contents/" + GITHUB_DATA_PATH;
-    var headers = {
-      "Authorization": "token " + GITHUB_TOKEN,
-      "Accept": "application/vnd.github.v3+json",
-      "Content-Type": "application/json"
-    };
+  async function submitToSharedStorage(entry){
+    // Always save locally first
+    var existing = localLeaderboard.filter(function(e){ return e.id !== entry.id; });
+    existing.unshift(entry);
+    localLeaderboard = existing;
+    localStorage.setItem("genie_leaderboard", JSON.stringify(localLeaderboard));
 
-    // 1. GET the current file to obtain its SHA and content
-    return fetch(apiBase, { headers: headers })
-      .then(function(res) {
-        if (!res.ok) throw new Error("Could not read data.json (HTTP " + res.status + ")");
-        return res.json();
-      })
-      .then(function(fileData) {
-        var sha = fileData.sha;
-        // Decode existing content (base64, may have line breaks)
-        var decoded = atob(fileData.content.replace(/\n/g, ""));
-        var existing = [];
-        try { existing = JSON.parse(decoded); } catch(e) { existing = []; }
-        if (!Array.isArray(existing)) existing = [];
+    if (!storageAvailable()) {
+      throw new Error("Shared storage is not available in this environment. Your score has been saved locally.");
+    }
 
-        // Append new entry (avoid duplicate ids)
-        existing = existing.filter(function(e) { return e.id !== entry.id; });
-        existing.push(entry);
+    // Write entry to shared storage
+    await window.storage.set(LB_STORAGE_PREFIX + entry.id, JSON.stringify(entry), true);
 
-        // Sort descending by score
-        existing.sort(function(a, b) { return (b.score || 0) - (a.score || 0); });
+    // Update the shared index
+    var currentIndex = [];
+    try {
+      var idxResult = await window.storage.get(LB_STORAGE_INDEX_KEY, true);
+      currentIndex = JSON.parse(idxResult.value || "[]");
+    } catch(e) { currentIndex = []; }
 
-        // 2. PUT updated file back
-        var newContent = btoa(unescape(encodeURIComponent(JSON.stringify(existing, null, 2))));
-        return fetch(apiBase, {
-          method: "PUT",
-          headers: headers,
-          body: JSON.stringify({
-            message: "Leaderboard: add " + entry.name + " (" + entry.score + " pts)",
-            content: newContent,
-            sha: sha
-          })
-        });
-      })
-      .then(function(res) {
-        if (!res.ok) return res.json().then(function(b) {
-          throw new Error(b.message || "GitHub write failed (HTTP " + res.status + ")");
-        });
-        return res.json();
-      });
+    if (!currentIndex.includes(entry.id)) {
+      currentIndex.unshift(entry.id);
+      if (currentIndex.length > 200) currentIndex = currentIndex.slice(0, 200);
+    }
+    await window.storage.set(LB_STORAGE_INDEX_KEY, JSON.stringify(currentIndex), true);
   }
 
   function openSubmitModal(avgScore){
@@ -1715,26 +1734,47 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
       })
     };
     lastEntryId = entry.id;
-    localLeaderboard.push(entry);
-    localStorage.setItem("genie_leaderboard", JSON.stringify(localLeaderboard));
-    renderLeaderboard();
 
-    // Show modal in loading state
     var statusEl = $("submitStatus");
+    var actionBtns = $("submitActionBtns");
     var subEl = $("submitModalSub");
-    statusEl.innerHTML = '<div class="spinner" style="width:26px;height:26px;margin:0 auto 14px;border-radius:50%;border:3px solid var(--line);border-top-color:var(--glitch);animation:spin .9s linear infinite;"></div>Contacting the lamp\'s record-keeper…';
-    subEl.textContent = "Saving your score to the global leaderboard…";
+
+    // Reset modal state
+    statusEl.style.display = "none";
+    statusEl.textContent = "";
+    actionBtns.hidden = false;
+    subEl.textContent = "Your score of " + avgScore + " will be saved to the shared leaderboard so all visitors can see it.";
+
     submitOverlay.hidden = false;
 
-    submitToGitHub(entry).then(function() {
-      statusEl.innerHTML = '<div style="font-size:32px;margin-bottom:10px;">✅</div><span style="color:var(--glitch);font-weight:700;">Score saved!</span><br><span style="color:var(--text-dim);font-size:12px;margin-top:6px;display:block;">Your entry will appear on the leaderboard for all visitors after the page reloads.</span>';
-      subEl.textContent = "Your run has been committed to data.json.";
-      // Refresh seed leaderboard in background
-      fetchSeedLeaderboard();
-    }).catch(function(err) {
-      statusEl.innerHTML = '<div style="font-size:32px;margin-bottom:10px;">⚠️</div><span style="color:var(--danger);font-weight:600;">Could not save to global leaderboard</span><br><span style="color:var(--text-dim);font-size:12px;margin-top:6px;display:block;">' + escapeHtml(err && err.message ? err.message : String(err)) + '</span><br><span style="color:var(--text-dim);font-size:12px;">Your score is still saved locally in your browser.</span>';
-      subEl.textContent = "Something went wrong — your score is saved locally.";
-    });
+    $("confirmSubmitBtn").onclick = async function(){
+      $("confirmSubmitBtn").disabled = true;
+      $("confirmSubmitBtn").textContent = "Saving…";
+
+      try {
+        await submitToSharedStorage(entry);
+        actionBtns.hidden = true;
+        statusEl.style.display = "block";
+        statusEl.style.color = "var(--glitch)";
+        statusEl.style.background = "rgba(92,230,160,0.08)";
+        statusEl.style.border = "1px solid var(--glitch-dim)";
+        statusEl.innerHTML = '<div style="font-size:28px;margin-bottom:8px;">✅</div>Score saved to the shared leaderboard!';
+        subEl.textContent = "Other visitors will now see your entry.";
+        // Refresh leaderboard in background
+        fetchSeedLeaderboard();
+        setTimeout(function(){ submitOverlay.hidden = true; }, 2000);
+      } catch(err) {
+        $("confirmSubmitBtn").disabled = false;
+        $("confirmSubmitBtn").textContent = "Yes, add me to the board";
+        statusEl.style.display = "block";
+        statusEl.style.color = "var(--danger)";
+        statusEl.style.background = "rgba(255,93,114,0.08)";
+        statusEl.style.border = "1px solid var(--danger-dim)";
+        statusEl.innerHTML = '<div style="font-size:28px;margin-bottom:8px;">⚠️</div>' +
+          (err && err.message ? escapeHtml(err.message) : "Save failed.") +
+          '<br><span style="font-size:11px;color:var(--text-dim)">Your score is saved locally in your browser.</span>';
+      }
+    };
 
     $("closeSubmit").onclick = function(){ submitOverlay.hidden = true; };
     submitOverlay.onclick = function(e){ if (e.target === submitOverlay) submitOverlay.hidden = true; };
@@ -1761,5 +1801,5 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
 </script>
 </body>
 </html>
-index - 2026-06-28T171542.444.html
-Displaying index - 2026-06-28T171542.444.html.
+index - 2026-06-28T191254.840.html
+Displaying index - 2026-06-28T191254.840.html.
