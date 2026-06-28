@@ -1,0 +1,47 @@
+[
+  {
+    "id": "seed-001",
+    "name": "Priya K.",
+    "score": 91,
+    "date": "2026-06-12",
+    "wishes": [
+      {
+        "wish": "I wish for $1,000,000 USD, post-tax, deposited today into my checking account, adjusted so its real purchasing power equals $1,000,000 in 2026 dollars for the next 50 years.",
+        "loophole": "no named account, no named bank",
+        "proof": "You specified 'my checking account' but never named which bank or account number — the genie opened a brand-new checking account in your name at a bank you've never used, with no card, no online access, and a 90-day new-account hold on large deposits.",
+        "outcome": "You're now a millionaire on paper at an institution three states away that doesn't do mobile banking, requires in-person ID verification, and is closed for a regional holiday you've never heard of.",
+        "score": 91
+      }
+    ]
+  },
+  {
+    "id": "seed-002",
+    "name": "Marcus T.",
+    "score": 34,
+    "date": "2026-06-15",
+    "wishes": [
+      {
+        "wish": "I wish I could fly.",
+        "loophole": "no altitude, speed, or duration specified",
+        "proof": "The wish grants 'fly' with no airspeed, altitude ceiling, or landing mechanism specified — physically you now generate lift like an insect, topping out at around 4mph, two feet off the ground, with no ability to stop on command.",
+        "outcome": "You drift gently into traffic at jogging speed, unable to descend, while several large birds investigate you as a rival.",
+        "score": 34
+      }
+    ]
+  },
+  {
+    "id": "seed-003",
+    "name": "the_lurker99",
+    "score": 78,
+    "date": "2026-06-20",
+    "wishes": [
+      {
+        "wish": "I wish to understand every language spoken by any human currently alive, in real time, for the rest of my natural life, with no side effects on my own native language ability.",
+        "loophole": "'understand' is not 'be understood'",
+        "proof": "You asked to understand every language — a strictly receptive skill. Nothing in the wording grants you the ability to speak, write, or be understood in return, so you now silently comprehend 7,000+ languages while remaining monolingual in output.",
+        "outcome": "You can follow every conversation on Earth perfectly and respond to none of them in anything but your one native tongue, which is exhausting at international dinner parties.",
+        "score": 78
+      }
+    ]
+  }
+]

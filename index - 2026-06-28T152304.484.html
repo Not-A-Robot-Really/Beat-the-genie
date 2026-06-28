@@ -1,0 +1,1339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<!--
+  BEAT THE GENIE
+  ---------------------------------------------------------------
+  Single-file static site. No build step. Works as-is on GitHub Pages.
+
+  SETUP FOR WHOEVER FORKS/HOSTS THIS
+  1. Visitors paste their own API key via the gear icon — it's stored
+     ONLY in their browser (localStorage) and sent directly from their
+     browser to the provider's API. It never touches a server you run.
+  2. Optional: site-wide "default" key. See DEFAULT_API_KEYS below.
+
+  ⚠️ ABOUT THE "DEFAULT KEY" OPTION — READ BEFORE YOU USE IT
+  This is a static HTML file. Anything you type into DEFAULT_API_KEYS
+  ships in plain text to every visitor's browser and is visible to
+  anyone who views source, opens devtools, or clones the repo —
+  including search engines and bots that scan GitHub for exposed keys.
+  Anthropic/OpenAI/Google will bill *your* account for however much
+  every visitor (or any bot that scrapes the key) uses. There is no
+  way to safely embed a real secret key in a public static page.
+  If you set one anyway: set a hard spending limit on that key in the
+  provider's console first, and treat it as disposable. The honest,
+  safe version of "default key" is a tiny serverless proxy (Cloudflare
+  Worker / Netlify Function / Vercel Edge Function) that holds the key
+  server-side and this page calls instead — left as a TODO below.
+
+  LEADERBOARD
+  Scores + wishes are stored in data.json, loaded at page start and
+  merged with whatever's in the visitor's own localStorage. A static
+  GitHub Pages site can't write back to a file in its own repo, so
+  there's no fully-automatic global leaderboard without a backend.
+  Instead, "Submit to leaderboard" opens a pre-filled GitHub Issue on
+  GITHUB_REPO (set the constant below) with the entry's JSON in the
+  body — the repo owner copies accepted entries into data.json and
+  commits. Swap in a real backend (Cloudflare KV, a Google Sheet via
+  Apps Script, Supabase, etc.) if you want it fully automatic.
+-->
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Beat the Genie</title>
+<meta name="description" content="Make a wish. The genie grants it exactly as worded, then exploits a loophole with receipts. Outsmart it in three tries and climb the leaderboard.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🧞</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700;900&family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg-deep:#130820;
+    --bg-deep-2:#1c0e30;
+    --bg-panel:#21123a;
+    --bg-panel-2:#2a1748;
+    --line:#3a2459;
+    --gold:#e3b04b;
+    --gold-soft:#f0cd82;
+    --gold-dim:#8a6a32;
+    --glitch:#5ce6a0;
+    --glitch-dim:#3aa173;
+    --danger:#ff5d72;
+    --danger-dim:#7a2f3c;
+    --text:#f6ead4;
+    --text-dim:#b8a8cf;
+    --shadow:0 20px 60px rgba(5,0,15,0.55);
+    --radius:18px;
+  }
+
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;
+    min-height:100vh;
+    background:radial-gradient(ellipse 90% 60% at 50% -10%, var(--bg-deep-2), var(--bg-deep) 60%);
+    color:var(--text);
+    font-family:'Space Grotesk', system-ui, sans-serif;
+    overflow-x:hidden;
+    position:relative;
+  }
+
+  /* ---------- background ---------- */
+  .stars{position:fixed; inset:0; z-index:0; pointer-events:none;}
+  .star{position:absolute; background:#fff; border-radius:50%; opacity:.6; animation:twinkle ease-in-out infinite;}
+  @keyframes twinkle{0%,100%{opacity:.15;} 50%{opacity:.85;}}
+  .vignette{position:fixed; inset:0; z-index:1; pointer-events:none;
+    background:radial-gradient(ellipse 70% 55% at 50% 30%, transparent 0%, rgba(8,3,16,0.0) 40%, rgba(8,3,16,0.55) 100%);}
+
+  /* ---------- layout shell ---------- */
+  .stage{position:relative; z-index:2; max-width:640px; margin:0 auto; padding:64px 24px 40px;}
+
+  .settings-btn{
+    position:fixed; top:18px; right:18px; z-index:30;
+    width:44px; height:44px; border-radius:50%;
+    background:var(--bg-panel); border:1px solid var(--line); color:var(--gold-soft);
+    font-size:19px; cursor:pointer; transition:transform .25s ease, background .2s ease;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .settings-btn:hover{ transform:rotate(35deg); background:var(--bg-panel-2);}
+  .settings-btn:focus-visible{ outline:2px solid var(--glitch); outline-offset:2px;}
+
+  .key-pill{
+    position:fixed; top:22px; right:74px; z-index:30;
+    font-family:'IBM Plex Mono', monospace; font-size:11px; letter-spacing:.04em;
+    color:var(--text-dim); background:var(--bg-panel); border:1px solid var(--line);
+    padding:6px 10px; border-radius:999px; display:flex; align-items:center; gap:6px;
+  }
+  .key-pill .dot{width:7px; height:7px; border-radius:50%; background:var(--danger); flex:none;}
+  .key-pill.linked .dot{background:var(--glitch); box-shadow:0 0 8px var(--glitch);}
+
+  /* ---------- masthead ---------- */
+  .masthead{text-align:center; margin-bottom:8px;}
+  .eyebrow{
+    font-family:'IBM Plex Mono', monospace; font-size:12px; letter-spacing:.28em;
+    color:var(--glitch); margin:0 0 14px; text-transform:uppercase;
+  }
+  .title{
+    font-family:'Cinzel', serif; font-weight:900;
+    font-size:clamp(40px, 9vw, 64px); line-height:1.02; letter-spacing:.01em;
+    margin:0 0 14px;
+    background:linear-gradient(180deg, var(--gold-soft), var(--gold) 60%, var(--gold-dim));
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+    text-shadow:0 2px 30px rgba(227,176,75,0.25);
+  }
+  .subtitle{font-size:16px; color:var(--text-dim); max-width:440px; margin:0 auto; line-height:1.5;}
+
+  /* ---------- lamp ---------- */
+  .lamp-wrap{
+    position:relative; width:280px; height:200px; margin:28px auto 8px;
+    animation:float 6s ease-in-out infinite;
+  }
+  @keyframes float{0%,100%{transform:translateY(0);} 50%{transform:translateY(-9px);}}
+  .lamp-wrap svg{width:100%; height:100%; filter:drop-shadow(0 18px 30px rgba(0,0,0,0.45));}
+  .lamp-wrap.rubbing svg{ animation:rub .5s ease-in-out infinite; }
+  @keyframes rub{0%,100%{transform:rotate(0deg);} 25%{transform:rotate(-3deg);} 75%{transform:rotate(3deg);}}
+  .eye-glow{ animation:pulse 2.6s ease-in-out infinite; }
+  @keyframes pulse{0%,100%{opacity:.55; r:12;} 50%{opacity:1; r:15;}}
+
+  .smoke-glyphs{position:absolute; inset:0; pointer-events:none; overflow:visible;}
+  .smoke-glyphs span{
+    position:absolute; left:14%; top:34%;
+    font-family:'IBM Plex Mono', monospace; font-size:9px; letter-spacing:.08em;
+    color:var(--glitch); white-space:nowrap; opacity:0;
+    animation:drift 6s linear infinite;
+    text-shadow:0 0 6px rgba(92,230,160,0.5);
+  }
+  @keyframes drift{
+    0%{opacity:0; transform:translate(0,0) rotate(0deg);}
+    8%{opacity:.85;}
+    85%{opacity:.6;}
+    100%{opacity:0; transform:translate(-46px,-150px) rotate(-6deg);}
+  }
+
+  /* ---------- wish counter ---------- */
+  .wish-counter{display:flex; justify-content:center; gap:14px; margin:18px 0 16px;}
+  .flame{
+    width:34px; height:34px; border-radius:50%;
+    display:flex; align-items:center; justify-content:center; font-size:17px;
+    background:radial-gradient(circle at 35% 30%, var(--gold-soft), var(--gold) 55%, var(--gold-dim));
+    box-shadow:0 0 16px rgba(227,176,75,0.55);
+    transition:filter .4s ease, opacity .4s ease, transform .4s ease;
+  }
+  .flame.spent{
+    background:#241334; box-shadow:none; filter:grayscale(1); opacity:.35; transform:scale(.88);
+  }
+
+  /* ---------- name field ---------- */
+  .name-row{ max-width:340px; margin:0 auto 22px; text-align:center;}
+  .name-row label{ display:block; font-size:11.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--text-dim); margin-bottom:8px;}
+  .name-row .name-hint{ text-transform:none; letter-spacing:0; opacity:.7;}
+  .name-row input{
+    width:100%; text-align:center; background:var(--bg-panel); color:var(--text);
+    border:1px solid var(--line); border-radius:999px; padding:9px 16px;
+    font-family:'Space Grotesk', sans-serif; font-size:14px;
+  }
+  .name-row input:focus{ outline:none; border-color:var(--glitch);}
+
+  /* ---------- wish form ---------- */
+  .wish-form{
+    background:linear-gradient(180deg, var(--bg-panel), var(--bg-panel-2));
+    border:1px solid var(--line); border-radius:var(--radius);
+    padding:22px 22px 18px; box-shadow:var(--shadow);
+  }
+  .field-label{display:block; font-size:12px; letter-spacing:.1em; text-transform:uppercase; color:var(--text-dim); margin-bottom:10px;}
+  textarea#wishInput{
+    width:100%; resize:vertical; min-height:84px;
+    background:var(--bg-deep); color:var(--text);
+    border:1px solid var(--line); border-radius:12px; padding:14px;
+    font-family:'Space Grotesk', sans-serif; font-size:15.5px; line-height:1.5;
+  }
+  textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0 0 0 3px rgba(92,230,160,0.15);}
+  .form-row{display:flex; align-items:center; justify-content:space-between; margin-top:12px; gap:12px;}
+  .char-count{font-family:'IBM Plex Mono', monospace; font-size:11.5px; color:var(--text-dim);}
+
+  .rub-btn{
+    background:linear-gradient(180deg, var(--gold-soft), var(--gold));
+    color:#241102; border:none; border-radius:999px; cursor:pointer;
+    font-family:'Space Grotesk', sans-serif; font-weight:700; font-size:14.5px;
+    padding:13px 24px; letter-spacing:.02em;
+    transition:transform .15s ease, box-shadow .15s ease, opacity .2s ease;
+    box-shadow:0 8px 20px rgba(227,176,75,0.3);
+  }
+  .rub-btn:hover:not(:disabled){ transform:translateY(-2px); box-shadow:0 12px 26px rgba(227,176,75,0.42);}
+  .rub-btn:active:not(:disabled){ transform:translateY(0);}
+  .rub-btn:disabled{ opacity:.45; cursor:not-allowed; box-shadow:none;}
+
+  .fine-print{font-size:11.5px; color:var(--text-dim); opacity:.7; text-align:center; margin:14px 0 0; font-style:italic;}
+
+  /* ---------- genie response ---------- */
+  .genie-response{margin-top:22px;}
+  .loading-card{
+    border:1px dashed var(--line); border-radius:var(--radius); padding:24px;
+    text-align:center; color:var(--text-dim); font-family:'IBM Plex Mono', monospace; font-size:13px;
+  }
+  .loading-card .spinner{
+    width:26px; height:26px; margin:0 auto 14px; border-radius:50%;
+    border:3px solid var(--line); border-top-color:var(--glitch);
+    animation:spin .9s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg);}}
+
+  .result-card{
+    background:linear-gradient(180deg, var(--bg-panel), #1a0e2c);
+    border:1px solid var(--danger-dim); border-radius:var(--radius);
+    padding:22px; box-shadow:var(--shadow);
+    animation:reveal .45s ease both;
+  }
+  @keyframes reveal{from{opacity:0; transform:translateY(10px) scale(.98);} to{opacity:1; transform:translateY(0) scale(1);}}
+
+  .your-wish{font-size:13px; color:var(--text-dim); margin:0 0 14px; line-height:1.5;}
+  .your-wish b{color:var(--text); font-weight:600;}
+
+  .card-top-row{display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:14px;}
+
+  .loophole-tag{
+    display:inline-flex; align-items:center; gap:8px;
+    font-family:'IBM Plex Mono', monospace; font-size:11.5px; letter-spacing:.08em; text-transform:uppercase;
+    color:var(--danger); background:rgba(255,93,114,0.1); border:1px solid var(--danger-dim);
+    padding:6px 12px; border-radius:999px; margin-bottom:0;
+  }
+  .loophole-tag::before{content:"⚠"; font-size:12px;}
+
+  .score-badge{
+    flex:none; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    width:56px; height:56px; border-radius:50%; text-align:center;
+    background:radial-gradient(circle at 35% 30%, var(--bg-panel-2), var(--bg-deep));
+    border:2px solid var(--glitch); box-shadow:0 0 14px rgba(92,230,160,0.35);
+  }
+  .score-badge .sb-num{ font-family:'IBM Plex Mono', monospace; font-weight:700; font-size:16px; color:var(--glitch); line-height:1;}
+  .score-badge .sb-lbl{ font-size:8px; letter-spacing:.06em; color:var(--text-dim); text-transform:uppercase; margin-top:2px;}
+
+  .outcome-text{font-size:16px; line-height:1.6; color:var(--text); margin:0 0 16px;}
+
+  .proof-block{
+    background:rgba(92,230,160,0.06); border:1px solid var(--glitch-dim); border-radius:12px;
+    padding:13px 14px; margin:0 0 16px;
+  }
+  .proof-block .pb-label{
+    font-family:'IBM Plex Mono', monospace; font-size:10.5px; letter-spacing:.1em; text-transform:uppercase;
+    color:var(--glitch); margin:0 0 6px; display:flex; align-items:center; gap:6px;
+  }
+  .proof-block .pb-label::before{content:"§";}
+  .proof-block p{ font-size:13.5px; color:var(--text-dim); line-height:1.55; margin:0; font-family:'IBM Plex Mono', monospace;}
+
+  .verdict-text{
+    font-family:'Cinzel', serif; font-size:14px; color:var(--gold-soft);
+    border-top:1px solid var(--line); padding-top:14px; margin:0;
+  }
+
+  .error-card{
+    border:1px solid var(--danger-dim); background:rgba(255,93,114,0.07);
+    border-radius:var(--radius); padding:20px; text-align:center; font-size:14px; color:var(--text);
+  }
+  .error-card .err-title{color:var(--danger); font-weight:600; margin:0 0 6px;}
+
+  .response-actions{display:flex; gap:10px; justify-content:center; margin-top:18px; flex-wrap:wrap;}
+  .ghost-btn{
+    background:transparent; border:1px solid var(--line); color:var(--text);
+    border-radius:999px; padding:10px 18px; font-family:'Space Grotesk', sans-serif; font-size:13.5px;
+    cursor:pointer; transition:border-color .2s ease, color .2s ease;
+  }
+  .ghost-btn:hover{ border-color:var(--glitch); color:var(--glitch);}
+
+  /* ---------- recap ---------- */
+  .recap{margin-top:8px;}
+  .recap h2{
+    font-family:'Cinzel', serif; text-align:center; font-size:26px;
+    color:var(--gold-soft); margin:0 0 6px;
+  }
+  .recap .recap-sub{ text-align:center; color:var(--text-dim); font-size:13.5px; margin:0 0 18px;}
+  .final-score{
+    text-align:center; margin:0 0 22px; padding:18px; border-radius:14px;
+    background:linear-gradient(180deg, var(--bg-panel), var(--bg-panel-2)); border:1px solid var(--line);
+  }
+  .final-score .fs-num{ font-family:'Cinzel', serif; font-weight:900; font-size:42px; color:var(--gold-soft); line-height:1;}
+  .final-score .fs-lbl{ font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--text-dim); margin-top:6px;}
+  .recap-item{
+    border:1px solid var(--line); border-radius:14px; padding:16px 18px; margin-bottom:12px;
+    background:var(--bg-panel);
+  }
+  .recap-item .ri-top{display:flex; align-items:center; justify-content:space-between; gap:10px;}
+  .recap-item .ri-num{ font-family:'IBM Plex Mono', monospace; color:var(--glitch); font-size:11px; letter-spacing:.1em;}
+  .recap-item .ri-score{ font-family:'IBM Plex Mono', monospace; color:var(--gold-soft); font-size:11px;}
+  .recap-item .ri-wish{ font-size:14px; margin:6px 0 8px; color:var(--text);}
+  .recap-item .ri-outcome{ font-size:13.5px; color:var(--text-dim); line-height:1.55; margin:0;}
+  .recap-actions{display:flex; justify-content:center; gap:10px; margin-top:20px; flex-wrap:wrap;}
+
+  /* ---------- leaderboard ---------- */
+  .leaderboard{margin-top:36px;}
+  .leaderboard h2{
+    font-family:'Cinzel', serif; text-align:center; font-size:24px; color:var(--gold-soft); margin:0 0 6px;
+  }
+  .lb-sub{text-align:center; color:var(--text-dim); font-size:13px; margin:0 0 20px; line-height:1.5;}
+  .lb-loading{text-align:center; color:var(--text-dim); font-family:'IBM Plex Mono', monospace; font-size:12px;}
+  .lb-row{
+    display:flex; align-items:center; gap:12px; padding:11px 14px; border-radius:12px;
+    border:1px solid var(--line); background:var(--bg-panel); margin-bottom:8px;
+  }
+  .lb-row .lb-rank{ font-family:'Cinzel', serif; font-weight:700; color:var(--gold-soft); width:26px; text-align:center; flex:none;}
+  .lb-row .lb-name{ flex:1; font-size:14px; color:var(--text); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .lb-row .lb-wish-preview{ display:block; font-size:11.5px; color:var(--text-dim); margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .lb-row .lb-score{ font-family:'IBM Plex Mono', monospace; font-weight:700; color:var(--glitch); flex:none; font-size:15px;}
+  .lb-row.lb-mine{ border-color:var(--glitch);}
+  .lb-empty{ text-align:center; color:var(--text-dim); font-size:13px; padding:16px;}
+
+  .submit-json{
+    width:100%; background:var(--bg-deep); color:var(--text-dim); border:1px solid var(--line);
+    border-radius:10px; padding:10px; font-family:'IBM Plex Mono', monospace; font-size:11.5px;
+    margin-bottom:14px; resize:vertical;
+  }
+
+  /* ---------- modal ---------- */
+  .modal-overlay{
+    position:fixed; inset:0; z-index:50; background:rgba(8,3,16,0.7); backdrop-filter:blur(3px);
+    display:flex; align-items:center; justify-content:center; padding:20px;
+  }
+  .modal{
+    width:100%; max-width:420px; background:linear-gradient(180deg, var(--bg-panel-2), var(--bg-deep-2));
+    border:1px solid var(--line); border-radius:var(--radius); padding:26px; box-shadow:var(--shadow);
+  }
+  .modal h2{ font-family:'Cinzel', serif; font-size:21px; color:var(--gold-soft); margin:0 0 4px;}
+  .modal .modal-sub{ font-size:13px; color:var(--text-dim); margin:0 0 20px; line-height:1.5;}
+  .modal label{display:block; font-size:12px; letter-spacing:.06em; text-transform:uppercase; color:var(--text-dim); margin-bottom:8px;}
+  .modal input[type="password"], .modal input[type="text"], .modal select{
+    width:100%; background:var(--bg-deep); color:var(--text); border:1px solid var(--line);
+    border-radius:10px; padding:11px 12px; font-family:'IBM Plex Mono', monospace; font-size:13px; margin-bottom:16px;
+  }
+  .modal select{ font-family:'Space Grotesk', sans-serif;}
+  .key-row{display:flex; gap:8px;}
+  .key-row input{flex:1;}
+  .show-key{
+    background:var(--bg-deep); border:1px solid var(--line); color:var(--text-dim);
+    border-radius:10px; padding:0 12px; cursor:pointer; font-size:12px;
+  }
+  .modal-actions{display:flex; gap:10px; margin-top:6px;}
+  .save-btn{
+    flex:1; background:linear-gradient(180deg, var(--gold-soft), var(--gold)); color:#241102;
+    border:none; border-radius:10px; padding:12px; font-weight:700; cursor:pointer;
+    font-family:'Space Grotesk', sans-serif; font-size:14px;
+  }
+  .close-btn{
+    background:transparent; border:1px solid var(--line); color:var(--text); border-radius:10px;
+    padding:12px 16px; cursor:pointer; font-family:'Space Grotesk', sans-serif; font-size:14px;
+  }
+  .modal-note{font-size:11.5px; color:var(--text-dim); margin-top:16px; line-height:1.5; opacity:.85;}
+  .modal-note a{color:var(--glitch); text-decoration:none; border-bottom:1px dotted var(--glitch-dim);}
+  .cors-warn{
+    font-size:11.5px; line-height:1.5; color:var(--danger);
+    background:rgba(255,93,114,0.08); border:1px solid var(--danger-dim);
+    border-radius:8px; padding:9px 11px; margin:-6px 0 16px;
+  }
+
+  /* ---------- footer ---------- */
+  .site-footer{ text-align:center; padding:30px 20px 50px; color:var(--text-dim); font-size:12px; position:relative; z-index:2;}
+  .site-footer a{color:var(--glitch); text-decoration:none; border-bottom:1px dotted var(--glitch-dim);}
+
+  [hidden]{ display:none !important;}
+
+  @media (max-width:480px){
+    .stage{padding:80px 16px 30px;}
+    .lamp-wrap{width:230px; height:165px;}
+    .key-pill{display:none;}
+  }
+
+  @media (prefers-reduced-motion: reduce){
+    *{animation-duration:0.001s !important; animation-iteration-count:1 !important; transition-duration:0.001s !important;}
+  }
+</style>
+</head>
+<body>
+
+<div class="stars" id="stars"></div>
+<div class="vignette"></div>
+
+<button class="settings-btn" id="settingsBtn" aria-label="Open genie settings" title="Genie settings">⚙</button>
+<div class="key-pill" id="keyPill"><span class="dot"></span><span id="keyPillText">no key linked</span></div>
+
+<main class="stage">
+
+  <header class="masthead">
+    <p class="eyebrow">Ask carefully</p>
+    <h1 class="title">BEAT THE GENIE</h1>
+    <p class="subtitle">The genie grants every wish exactly as worded, then finds a loophole and shows its receipts. Outsmart it in three tries — your best score makes the leaderboard.</p>
+  </header>
+
+  <div class="lamp-wrap" id="lampWrap" aria-hidden="true">
+    <svg viewBox="0 0 300 200" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="goldGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#f4d896"/>
+          <stop offset="55%" stop-color="#e3b04b"/>
+          <stop offset="100%" stop-color="#a87526"/>
+        </linearGradient>
+        <linearGradient id="goldGradDark" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#c8923c"/>
+          <stop offset="100%" stop-color="#7d5620"/>
+        </linearGradient>
+        <radialGradient id="eyeGlow" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stop-color="#bdfff0"/>
+          <stop offset="55%" stop-color="#5ce6a0"/>
+          <stop offset="100%" stop-color="#1d6b48" stop-opacity="0"/>
+        </radialGradient>
+      </defs>
+
+      <ellipse cx="150" cy="174" rx="68" ry="8" fill="#000" opacity="0.35"/>
+      <rect x="92" y="160" width="116" height="16" rx="7" fill="url(#goldGradDark)"/>
+      <path d="M68,118 C30,108 8,86 17,66 C22,54 36,57 41,70 C50,93 60,108 82,116 Z" fill="url(#goldGrad)"/>
+      <ellipse cx="150" cy="128" rx="88" ry="44" fill="url(#goldGrad)"/>
+      <path d="M222,98 C246,104 252,128 234,144 C226,151 215,151 211,143" fill="none" stroke="url(#goldGrad)" stroke-width="9" stroke-linecap="round"/>
+      <ellipse cx="150" cy="84" rx="26" ry="13" fill="url(#goldGradDark)"/>
+      <circle cx="150" cy="67" r="7" fill="url(#goldGrad)"/>
+      <circle class="eye-glow" cx="150" cy="128" r="13" fill="url(#eyeGlow)"/>
+      <circle cx="119" cy="118" r="2.4" fill="#5ce6a0" opacity="0.8"/>
+      <circle cx="183" cy="140" r="2" fill="#5ce6a0" opacity="0.6"/>
+      <circle cx="170" cy="105" r="1.6" fill="#5ce6a0" opacity="0.7"/>
+    </svg>
+    <div class="smoke-glyphs" id="smokeGlyphs"></div>
+  </div>
+
+  <div class="wish-counter" id="wishCounter" role="status" aria-label="Wishes remaining"></div>
+
+  <div class="name-row">
+    <label for="wisherName">Your name <span class="name-hint">(for the leaderboard)</span></label>
+    <input type="text" id="wisherName" maxlength="24" placeholder="Anonymous Wisher">
+  </div>
+
+  <section class="wish-form" id="wishForm">
+    <label class="field-label" for="wishInput">Speak your wish</label>
+    <textarea id="wishInput" maxlength="280" rows="3" placeholder="I wish for..."></textarea>
+    <div class="form-row">
+      <span class="char-count" id="charCount">280 left</span>
+      <button class="rub-btn" id="rubBtn">Rub the lamp</button>
+    </div>
+    <p class="fine-print">Terms and conditions apply. They always do.</p>
+  </section>
+
+  <section class="genie-response" id="genieResponse" aria-live="polite" hidden></section>
+
+  <section class="recap" id="recap" hidden></section>
+
+  <section class="leaderboard" id="leaderboard" hidden>
+    <h2>Hall of Outsmarted Wishers</h2>
+    <p class="lb-sub">Ranked by average score across all three wishes. Higher score = the genie had to work harder to screw you over.</p>
+    <div class="lb-list" id="lbList"></div>
+    <p class="lb-loading" id="lbLoading" hidden>Loading the lamp's ledger…</p>
+  </section>
+
+</main>
+
+<div class="modal-overlay" id="settingsOverlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <h2 id="modalTitle">Link the lamp</h2>
+    <p class="modal-sub" id="modalSub">Pick an AI provider and paste an API key to wake the genie up — it's stored only in your browser and sent straight to that provider, never to us.</p>
+
+    <label for="providerSelect">Provider</label>
+    <select id="providerSelect">
+      <option value="anthropic">Anthropic — Claude</option>
+      <option value="gemini">Google — Gemini</option>
+      <option value="openai">OpenAI — ChatGPT</option>
+    </select>
+
+    <label for="apiKeyInput" id="apiKeyLabel">Anthropic API key</label>
+    <div class="key-row">
+      <input type="password" id="apiKeyInput" placeholder="sk-ant-...">
+      <button class="show-key" id="toggleKeyVisibility" type="button">show</button>
+    </div>
+    <p class="cors-warn" id="corsWarn" hidden></p>
+
+    <label for="modelSelect">Model</label>
+    <select id="modelSelect"></select>
+
+    <div class="modal-actions">
+      <button class="save-btn" id="saveSettings">Save &amp; close</button>
+      <button class="close-btn" id="closeSettings">Cancel</button>
+    </div>
+
+    <p class="modal-note">Get a key at <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener" id="getKeyLink">console.anthropic.com/settings/keys</a>. Keys cost money to use — set a spending limit if you're handing this page to other people.</p>
+  </div>
+</div>
+
+<div class="modal-overlay" id="submitOverlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="submitTitle">
+    <h2 id="submitTitle">Submit to the leaderboard</h2>
+    <p class="modal-sub">This page can't write to its own GitHub repo by itself, so submitting opens a pre-filled GitHub Issue with your entry. The repo owner reviews it and merges it into <code>data.json</code>.</p>
+    <textarea id="submitJson" class="submit-json" readonly rows="6"></textarea>
+    <div class="modal-actions">
+      <button class="save-btn" id="copyJsonBtn">Copy entry</button>
+      <button class="save-btn" id="openIssueBtn">Open GitHub Issue</button>
+    </div>
+    <div class="modal-actions" style="margin-top:8px;">
+      <button class="close-btn" id="closeSubmit" style="flex:1;">Just keep it local</button>
+    </div>
+    <p class="modal-note">No GitHub repo configured yet? Set <code>GITHUB_REPO</code> near the top of the script. Until then this just saves to your own browser.</p>
+  </div>
+</div>
+
+<footer class="site-footer">
+  <p>A genie that grants the letter of your wish, never the spirit of it. · Bring your own API key · <a href="https://github.com" target="_blank" rel="noopener" id="viewSourceLink">view source</a></p>
+</footer>
+
+<script>
+(function(){
+  "use strict";
+
+  /* ---------------- constants ---------------- */
+  var MAX_WISHES = 3;
+
+  // Set this to "owner/repo" (e.g. "alexsmith/beat-the-genie") to enable the
+  // "Open GitHub Issue" leaderboard submission button. Leave blank to disable it.
+  var GITHUB_REPO = "";
+
+  // OPTIONAL "default" key so visitors don't have to bring their own.
+  // ⚠️ See the big warning comment at the top of this file before filling
+  // this in — anything here is public to every visitor of this page.
+  // Example: { anthropic: "sk-ant-..." }  — leave {} to require visitors
+  // to paste their own key (the safe default).
+  var DEFAULT_API_KEYS = {};
+
+  var LOADING_MESSAGES = [
+    "Reading the fine print...",
+    "Consulting the lamp's lawyers...",
+    "Searching for a technicality...",
+    "Cross-referencing clause 4(b)...",
+    "Compiling malicious compliance...",
+    "Finding the letter, losing the spirit...",
+    "Footnoting your doom...",
+    "Peer-reviewing the curse...",
+    "Calculating exactly how literal to be...",
+    "Drafting a rebuttal you didn't ask for..."
+  ];
+  var SMOKE_PHRASES = ["TERMS APPLY", "SEC. 4(b)", "AS WORDED", "LOOPHOLE FOUND", "READ FINE PRINT", "GRANTED*"];
+
+  var PROVIDERS = {
+    anthropic: {
+      label: "Anthropic — Claude",
+      keyLabel: "Anthropic API key",
+      keyPlaceholder: "sk-ant-...",
+      consoleUrl: "https://console.anthropic.com/settings/keys",
+      consoleLabel: "console.anthropic.com/settings/keys",
+      corsNote: null,
+      defaultModel: "claude-sonnet-4-6",
+      models: [
+        { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6 — balanced (recommended)" },
+        { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5 — fastest / cheapest" },
+        { id: "claude-opus-4-7", label: "Claude Opus 4.7 — most elaborate nightmares" }
+      ]
+    },
+    gemini: {
+      label: "Google — Gemini",
+      keyLabel: "Gemini API key",
+      keyPlaceholder: "AIza...",
+      consoleUrl: "https://aistudio.google.com/apikey",
+      consoleLabel: "aistudio.google.com/apikey",
+      corsNote: "Heads up: Google's API has inconsistent browser CORS support — it works for some visitors and fails with a network error for others. If it fails here, you'd need a small backend proxy.",
+      defaultModel: "gemini-3.5-flash",
+      models: [
+        { id: "gemini-3.5-flash", label: "Gemini 3.5 Flash — balanced (recommended)" },
+        { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite — fastest / cheapest" },
+        { id: "gemini-3.1-pro", label: "Gemini 3.1 Pro — most elaborate nightmares" }
+      ]
+    },
+    openai: {
+      label: "OpenAI — ChatGPT",
+      keyLabel: "OpenAI API key",
+      keyPlaceholder: "sk-...",
+      consoleUrl: "https://platform.openai.com/api-keys",
+      consoleLabel: "platform.openai.com/api-keys",
+      corsNote: "Heads up: OpenAI's API does not allow direct calls from browser JavaScript (no CORS support). This will very likely fail here with a network error unless you put a small backend proxy in front of it.",
+      defaultModel: "gpt-5.5",
+      models: [
+        { id: "gpt-5.5", label: "GPT-5.5 — balanced (recommended)" },
+        { id: "gpt-5.4-mini", label: "GPT-5.4 Mini — fastest / cheapest" },
+        { id: "gpt-5.5-pro", label: "GPT-5.5 Pro — most elaborate nightmares" }
+      ]
+    }
+  };
+
+  var SYSTEM_PROMPT = [
+    "You are the Genie in BEAT THE GENIE — trapped in a lamp for three thousand years, and you've",
+    "become an insufferable, brilliant pedant about it. When someone makes a wish, you grant it",
+    "EXACTLY as worded, but you exploit a specific, real, defensible loophole in the literal",
+    "phrasing so the outcome is an ironic, darkly funny disaster for the wisher.",
+    "",
+    "BE SPECIFIC, NOT GENERIC. Vague catches like 'be careful what you wish for' are a failure.",
+    "Every loophole must hinge on one identifiable feature of the EXACT wording: an ambiguous",
+    "pronoun, an unstated unit (which currency, which 'pounds', whose 'years'), a scope gap (the",
+    "wish covers 'this room' but not the hallway), a tense/aspect issue, a missing quantifier",
+    "('a million dollars' vs 'a million dollars, after tax, today, adjusted for inflation, to me",
+    "personally'), a presupposition failure, a category error, a physical/legal/biological",
+    "technicality, or similar. Nerd out: reach for real concepts from law (contract literalism,",
+    "force majeure), linguistics (scope ambiguity, deixis, presupposition), physics (conservation",
+    "laws, reference frames, thermodynamics), economics (nominal vs real value, opportunity cost),",
+    "biology, or formal logic when they genuinely fit — never just for show.",
+    "",
+    "PROOF IS MANDATORY. You must justify the loophole by quoting or pinpointing the exact word(s)",
+    "in the wisher's own phrasing that license your reading, then explain in one or two sentences",
+    "why that reading is the more literal/technically correct one. This is the 'proof' field — it",
+    "should read like a smug citation, e.g. referencing the specific clause, the specific ambiguity,",
+    "or a back-of-envelope calculation, not a vague 'because genies are tricky'.",
+    "",
+    "SCORE THE WISH 0-100 on how airtight it was, i.e. how hard YOU had to work to find a hole in",
+    "it. 0-20: full of obvious gaps (vague pronouns, no scope, no units) — trivial to twist. 40-60:",
+    "decent but missing at least one specifier. 70-85: tightly worded, you had to dig for a genuinely",
+    "subtle technicality. 90-100: nearly airtight; you basically had to invent an absurd edge case",
+    "to find ANY hole at all. You always find a hole regardless of score — that's the game — but the",
+    "score should honestly reflect how clever and precise the wisher's phrasing was.",
+    "",
+    "Hard rules: keep it PG-13. No graphic violence, gore, sexual content, slurs, hate, or real",
+    "named public figures. Nobody actually gets hurt for real — keep the outcome absurd, ironic,",
+    "reversible-feeling, and funny, like a sitcom curse, not a tragedy.",
+    "",
+    "Respond with ONLY a single JSON object and nothing else — no markdown fences, no preamble,",
+    "no commentary outside the object. Use exactly this shape:",
+    '{"loophole": "a punchy 3-7 word tag naming the technicality you exploited",',
+    ' "proof": "1-3 sentences citing the exact wording and the technical/nerdy justification for your reading",',
+    ' "outcome": "2-4 sentences, second person (\\"you\\"), describing the ironic result in your sly genie voice",',
+    ' "verdict": "a short one-line sardonic sign-off, max 12 words",',
+    ' "score": 0}'
+  ].join("\n");
+
+  /* ---------------- state ---------------- */
+  var wishesUsed = parseInt(localStorage.getItem("genie_wishes_used") || "0", 10);
+  var wishHistory = [];
+  try { wishHistory = JSON.parse(localStorage.getItem("genie_wish_history") || "[]"); } catch(e) { wishHistory = []; }
+  var localLeaderboard = [];
+  try { localLeaderboard = JSON.parse(localStorage.getItem("genie_leaderboard") || "[]"); } catch(e) { localLeaderboard = []; }
+  var seedLeaderboard = [];
+  var lastEntryId = null;
+
+  /* ---------------- elements ---------------- */
+  var $ = function(id){ return document.getElementById(id); };
+  var wishCounterEl = $("wishCounter");
+  var wishForm = $("wishForm");
+  var wishInput = $("wishInput");
+  var charCount = $("charCount");
+  var rubBtn = $("rubBtn");
+  var genieResponse = $("genieResponse");
+  var recapEl = $("recap");
+  var lampWrap = $("lampWrap");
+  var smokeGlyphs = $("smokeGlyphs");
+  var settingsBtn = $("settingsBtn");
+  var settingsOverlay = $("settingsOverlay");
+  var providerSelect = $("providerSelect");
+  var apiKeyInput = $("apiKeyInput");
+  var apiKeyLabel = $("apiKeyLabel");
+  var corsWarn = $("corsWarn");
+  var modelSelect = $("modelSelect");
+  var getKeyLink = $("getKeyLink");
+  var keyPill = $("keyPill");
+  var keyPillText = $("keyPillText");
+  var wisherNameInput = $("wisherName");
+  var leaderboardEl = $("leaderboard");
+  var lbList = $("lbList");
+  var lbLoading = $("lbLoading");
+  var submitOverlay = $("submitOverlay");
+  var submitJson = $("submitJson");
+
+  /* ---------------- background stars ---------------- */
+  (function makeStars(){
+    var wrap = $("stars");
+    var n = window.innerWidth < 480 ? 50 : 90;
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < n; i++) {
+      var s = document.createElement("div");
+      s.className = "star";
+      var size = (Math.random() * 2 + 0.6).toFixed(1);
+      s.style.width = size + "px";
+      s.style.height = size + "px";
+      s.style.left = (Math.random() * 100) + "%";
+      s.style.top = (Math.random() * 100) + "%";
+      s.style.animationDuration = (Math.random() * 3 + 2).toFixed(2) + "s";
+      s.style.animationDelay = (Math.random() * 3).toFixed(2) + "s";
+      frag.appendChild(s);
+    }
+    wrap.appendChild(frag);
+  })();
+
+  /* ---------------- smoke glyphs ---------------- */
+  (function makeSmoke(){
+    for (var i = 0; i < SMOKE_PHRASES.length; i++) {
+      var span = document.createElement("span");
+      span.textContent = SMOKE_PHRASES[i];
+      span.style.left = (8 + Math.random() * 10) + "%";
+      span.style.top = (28 + Math.random() * 10) + "%";
+      span.style.animationDuration = (5 + Math.random() * 2.5).toFixed(2) + "s";
+      span.style.animationDelay = (i * 0.9).toFixed(2) + "s";
+      smokeGlyphs.appendChild(span);
+    }
+  })();
+
+  /* ---------------- helpers ---------------- */
+  function escapeHtml(str){
+    var d = document.createElement("div");
+    d.textContent = str;
+    return d.innerHTML;
+  }
+
+  function getProvider(){ return localStorage.getItem("genie_provider") || "anthropic"; }
+
+  function getKeyStore(){
+    try { return JSON.parse(localStorage.getItem("genie_keys") || "{}"); } catch(e) { return {}; }
+  }
+  function getModelStore(){
+    try { return JSON.parse(localStorage.getItem("genie_models") || "{}"); } catch(e) { return {}; }
+  }
+
+  function getApiKey(providerId){
+    providerId = providerId || getProvider();
+    return getKeyStore()[providerId] || DEFAULT_API_KEYS[providerId] || "";
+  }
+  function isUsingDefaultKey(providerId){
+    providerId = providerId || getProvider();
+    return !getKeyStore()[providerId] && !!DEFAULT_API_KEYS[providerId];
+  }
+  function getModel(providerId){
+    providerId = providerId || getProvider();
+    return getModelStore()[providerId] || PROVIDERS[providerId].defaultModel;
+  }
+
+  function refreshKeyPill(){
+    var has = !!getApiKey();
+    keyPill.classList.toggle("linked", has);
+    var base = has ? (PROVIDERS[getProvider()].label.split("—")[1].trim() + " linked") : "no key linked";
+    keyPillText.textContent = isUsingDefaultKey() ? (base + " (site default)") : base;
+  }
+
+  function renderWishCounter(){
+    wishCounterEl.innerHTML = "";
+    for (var i = 0; i < MAX_WISHES; i++) {
+      var f = document.createElement("span");
+      f.className = "flame" + (i < wishesUsed ? " spent" : "");
+      f.textContent = i < wishesUsed ? "💨" : "🔥";
+      wishCounterEl.appendChild(f);
+    }
+  }
+
+  function setFormEnabled(enabled){
+    wishInput.disabled = !enabled;
+    rubBtn.disabled = !enabled || wishInput.value.trim().length === 0;
+  }
+
+  /* ---------------- char counter ---------------- */
+  wishInput.addEventListener("input", function(){
+    var left = 280 - wishInput.value.length;
+    charCount.textContent = left + " left";
+    rubBtn.disabled = wishInput.value.trim().length === 0 || wishesUsed >= MAX_WISHES;
+  });
+
+  /* ---------------- wisher name ---------------- */
+  wisherNameInput.value = localStorage.getItem("genie_wisher_name") || "";
+  wisherNameInput.addEventListener("input", function(){
+    localStorage.setItem("genie_wisher_name", wisherNameInput.value);
+  });
+  function getWisherName(){
+    return (wisherNameInput.value || "").trim() || "Anonymous Wisher";
+  }
+
+  /* ---------------- settings modal ---------------- */
+  function populateModelOptions(providerId){
+    var provider = PROVIDERS[providerId];
+    modelSelect.innerHTML = "";
+    provider.models.forEach(function(m){
+      var opt = document.createElement("option");
+      opt.value = m.id;
+      opt.textContent = m.label;
+      modelSelect.appendChild(opt);
+    });
+  }
+
+  function applyProviderToModal(providerId){
+    var provider = PROVIDERS[providerId];
+    apiKeyLabel.textContent = provider.keyLabel;
+    apiKeyInput.value = getKeyStore()[providerId] || "";
+    if (DEFAULT_API_KEYS[providerId] && !apiKeyInput.value) {
+      apiKeyInput.placeholder = "(using site default key — paste your own to override)";
+    } else {
+      apiKeyInput.placeholder = provider.keyPlaceholder;
+    }
+    populateModelOptions(providerId);
+    modelSelect.value = getModel(providerId);
+    getKeyLink.href = provider.consoleUrl;
+    getKeyLink.textContent = provider.consoleLabel;
+    if (provider.corsNote) {
+      corsWarn.textContent = provider.corsNote;
+      corsWarn.hidden = false;
+    } else {
+      corsWarn.hidden = true;
+    }
+  }
+
+  function openSettings(){
+    var current = getProvider();
+    providerSelect.value = current;
+    applyProviderToModal(current);
+    settingsOverlay.hidden = false;
+    apiKeyInput.focus();
+  }
+  function closeSettings(){ settingsOverlay.hidden = true; }
+
+  settingsBtn.addEventListener("click", openSettings);
+  $("closeSettings").addEventListener("click", closeSettings);
+  settingsOverlay.addEventListener("click", function(e){ if (e.target === settingsOverlay) closeSettings(); });
+  document.addEventListener("keydown", function(e){ if (e.key === "Escape" && !settingsOverlay.hidden) closeSettings(); });
+
+  providerSelect.addEventListener("change", function(){
+    applyProviderToModal(providerSelect.value);
+  });
+
+  $("toggleKeyVisibility").addEventListener("click", function(){
+    var isPw = apiKeyInput.type === "password";
+    apiKeyInput.type = isPw ? "text" : "password";
+    this.textContent = isPw ? "hide" : "show";
+  });
+
+  $("saveSettings").addEventListener("click", function(){
+    var providerId = providerSelect.value;
+    var keys = getKeyStore();
+    var models = getModelStore();
+    keys[providerId] = apiKeyInput.value.trim();
+    models[providerId] = modelSelect.value;
+    localStorage.setItem("genie_keys", JSON.stringify(keys));
+    localStorage.setItem("genie_models", JSON.stringify(models));
+    localStorage.setItem("genie_provider", providerId);
+    refreshKeyPill();
+    closeSettings();
+  });
+
+  /* ---------------- genie call ---------------- */
+  function parseGenieJson(raw){
+    raw = (raw || "").trim().replace(/^```json/i, "").replace(/^```/, "").replace(/```$/, "").trim();
+    try {
+      var parsed = JSON.parse(raw);
+      var score = parseInt(parsed.score, 10);
+      parsed.score = isNaN(score) ? 50 : Math.max(0, Math.min(100, score));
+      return parsed;
+    } catch (e) {
+      return {
+        loophole: "translation error",
+        proof: "The genie's response didn't parse as valid JSON — no citation available.",
+        outcome: raw || "The genie's voice dissolves into static. Even immortal beings glitch sometimes.",
+        verdict: "Try rubbing the lamp again.",
+        score: 0
+      };
+    }
+  }
+
+  function callAnthropic(wishText, apiKey, model){
+    return fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true"
+      },
+      body: JSON.stringify({
+        model: model,
+        max_tokens: 400,
+        temperature: 1,
+        system: SYSTEM_PROMPT,
+        messages: [{ role: "user", content: "My wish: " + wishText }]
+      })
+    }).then(function(res){
+      if (!res.ok) {
+        return res.json().catch(function(){ return {}; }).then(function(errBody){
+          var msg = (errBody && errBody.error && errBody.error.message) || ("HTTP " + res.status);
+          throw new Error(msg);
+        });
+      }
+      return res.json();
+    }).then(function(data){
+      var raw = (data.content && data.content[0] && data.content[0].text) || "";
+      return parseGenieJson(raw);
+    });
+  }
+
+  function callGemini(wishText, apiKey, model){
+    var url = "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent";
+    return fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-goog-api-key": apiKey
+      },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: "My wish: " + wishText }] }],
+        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        generationConfig: { temperature: 1, maxOutputTokens: 400, responseMimeType: "application/json" }
+      })
+    }).then(function(res){
+      if (!res.ok) {
+        return res.json().catch(function(){ return {}; }).then(function(errBody){
+          var msg = (errBody && errBody.error && errBody.error.message) || ("HTTP " + res.status);
+          throw new Error(msg);
+        });
+      }
+      return res.json();
+    }).then(function(data){
+      var cand = data.candidates && data.candidates[0];
+      var raw = (cand && cand.content && cand.content.parts && cand.content.parts[0] && cand.content.parts[0].text) || "";
+      return parseGenieJson(raw);
+    });
+  }
+
+  function callOpenAI(wishText, apiKey, model){
+    return fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "authorization": "Bearer " + apiKey
+      },
+      body: JSON.stringify({
+        model: model,
+        max_completion_tokens: 500,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: "My wish: " + wishText }
+        ]
+      })
+    }).then(function(res){
+      if (!res.ok) {
+        return res.json().catch(function(){ return {}; }).then(function(errBody){
+          var msg = (errBody && errBody.error && errBody.error.message) || ("HTTP " + res.status);
+          throw new Error(msg);
+        });
+      }
+      return res.json();
+    }).then(function(data){
+      var raw = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || "";
+      return parseGenieJson(raw);
+    });
+  }
+
+  var CALL_FNS = { anthropic: callAnthropic, gemini: callGemini, openai: callOpenAI };
+
+  function callGenie(wishText){
+    var providerId = getProvider();
+    var apiKey = getApiKey(providerId);
+    var model = getModel(providerId);
+    return CALL_FNS[providerId](wishText, apiKey, model).catch(function(err){
+      var note = PROVIDERS[providerId].corsNote;
+      if (note && err && /fetch|network|failed/i.test(err.message || "")) {
+        throw new Error(err.message + " — " + note);
+      }
+      throw err;
+    });
+  }
+
+  /* ---------------- render: loading ---------------- */
+  var loadingTimer = null;
+  function showLoading(){
+    genieResponse.hidden = false;
+    genieResponse.innerHTML =
+      '<div class="loading-card"><div class="spinner"></div><div id="loadingMsg">' +
+      LOADING_MESSAGES[0] + "</div></div>";
+    var i = 0;
+    var msgEl = $("loadingMsg");
+    loadingTimer = setInterval(function(){
+      i = (i + 1) % LOADING_MESSAGES.length;
+      if (msgEl) msgEl.textContent = LOADING_MESSAGES[i];
+    }, 1300);
+  }
+  function stopLoading(){
+    if (loadingTimer) { clearInterval(loadingTimer); loadingTimer = null; }
+  }
+
+  /* ---------------- render: result ---------------- */
+  function showResult(wishText, result){
+    var card = document.createElement("div");
+    card.className = "result-card";
+
+    var yourWish = document.createElement("p");
+    yourWish.className = "your-wish";
+    yourWish.innerHTML = "You wished: &ldquo;<b>" + escapeHtml(wishText) + "</b>&rdquo;";
+
+    var topRow = document.createElement("div");
+    topRow.className = "card-top-row";
+
+    var tag = document.createElement("span");
+    tag.className = "loophole-tag";
+    tag.textContent = result.loophole || "loophole found";
+
+    var scoreBadge = document.createElement("div");
+    scoreBadge.className = "score-badge";
+    var sbNum = document.createElement("div");
+    sbNum.className = "sb-num";
+    sbNum.textContent = (typeof result.score === "number" ? result.score : "—");
+    var sbLbl = document.createElement("div");
+    sbLbl.className = "sb-lbl";
+    sbLbl.textContent = "/100";
+    scoreBadge.appendChild(sbNum);
+    scoreBadge.appendChild(sbLbl);
+
+    topRow.appendChild(tag);
+    topRow.appendChild(scoreBadge);
+
+    var outcome = document.createElement("p");
+    outcome.className = "outcome-text";
+    outcome.textContent = result.outcome || "";
+
+    var proofBlock = document.createElement("div");
+    proofBlock.className = "proof-block";
+    var proofLabel = document.createElement("p");
+    proofLabel.className = "pb-label";
+    proofLabel.textContent = "Genie's citation";
+    var proofText = document.createElement("p");
+    proofText.textContent = result.proof || "No citation provided.";
+    proofBlock.appendChild(proofLabel);
+    proofBlock.appendChild(proofText);
+
+    var verdict = document.createElement("p");
+    verdict.className = "verdict-text";
+    verdict.textContent = "\u2014 " + (result.verdict || "Wish granted. Technically.");
+
+    card.appendChild(yourWish);
+    card.appendChild(topRow);
+    card.appendChild(outcome);
+    card.appendChild(proofBlock);
+    card.appendChild(verdict);
+
+    var actions = document.createElement("div");
+    actions.className = "response-actions";
+    if (wishesUsed < MAX_WISHES) {
+      var again = document.createElement("button");
+      again.className = "ghost-btn";
+      again.textContent = "Make another wish (" + (MAX_WISHES - wishesUsed) + " left)";
+      again.addEventListener("click", function(){
+        wishInput.value = "";
+        charCount.textContent = "280 left";
+        genieResponse.hidden = true;
+        setFormEnabled(true);
+        wishInput.focus();
+      });
+      actions.appendChild(again);
+    } else {
+      var seeAll = document.createElement("button");
+      seeAll.className = "ghost-btn";
+      seeAll.textContent = "See the full curse";
+      seeAll.addEventListener("click", showRecap);
+      actions.appendChild(seeAll);
+    }
+    card.appendChild(actions);
+
+    genieResponse.innerHTML = "";
+    genieResponse.appendChild(card);
+    genieResponse.hidden = false;
+  }
+
+  function showError(message){
+    genieResponse.innerHTML =
+      '<div class="error-card"><p class="err-title">The lamp short-circuits.</p>' +
+      "<p>" + escapeHtml(message) + "</p></div>" +
+      '<div class="response-actions"><button class="ghost-btn" id="retryBtn">Try again</button>' +
+      '<button class="ghost-btn" id="openKeyBtn">Check API key</button></div>';
+    genieResponse.hidden = false;
+    $("retryBtn").addEventListener("click", function(){ genieResponse.hidden = true; setFormEnabled(true); });
+    $("openKeyBtn").addEventListener("click", openSettings);
+  }
+
+  /* ---------------- render: recap ---------------- */
+  function average(nums){
+    if (!nums.length) return 0;
+    var sum = 0;
+    for (var i = 0; i < nums.length; i++) sum += (nums[i] || 0);
+    return Math.round(sum / nums.length);
+  }
+
+  function showRecap(){
+    wishForm.hidden = true;
+    genieResponse.hidden = true;
+    recapEl.hidden = false;
+    recapEl.innerHTML = "";
+
+    var h2 = document.createElement("h2");
+    h2.textContent = "The lamp goes dark";
+    var sub = document.createElement("p");
+    sub.className = "recap-sub";
+    sub.textContent = "Three wishes, three loopholes. Here's everything you were granted.";
+    recapEl.appendChild(h2);
+    recapEl.appendChild(sub);
+
+    var avgScore = average(wishHistory.map(function(h){ return h.score; }));
+    var finalScore = document.createElement("div");
+    finalScore.className = "final-score";
+    finalScore.innerHTML = '<div class="fs-num">' + avgScore + '</div><div class="fs-lbl">average wish score, out of 100</div>';
+    recapEl.appendChild(finalScore);
+
+    wishHistory.forEach(function(item, idx){
+      var div = document.createElement("div");
+      div.className = "recap-item";
+      var top = document.createElement("div");
+      top.className = "ri-top";
+      var num = document.createElement("div");
+      num.className = "ri-num";
+      num.textContent = "WISH " + (idx + 1) + " \u00b7 " + (item.loophole || "");
+      var score = document.createElement("div");
+      score.className = "ri-score";
+      score.textContent = (typeof item.score === "number" ? item.score : "—") + "/100";
+      top.appendChild(num);
+      top.appendChild(score);
+      var wishP = document.createElement("p");
+      wishP.className = "ri-wish";
+      wishP.innerHTML = "&ldquo;" + escapeHtml(item.wish) + "&rdquo;";
+      var outP = document.createElement("p");
+      outP.className = "ri-outcome";
+      outP.textContent = item.outcome || "";
+      div.appendChild(top);
+      div.appendChild(wishP);
+      div.appendChild(outP);
+      recapEl.appendChild(div);
+    });
+
+    var actionsWrap = document.createElement("div");
+    actionsWrap.className = "recap-actions";
+    var submitBtn = document.createElement("button");
+    submitBtn.className = "rub-btn";
+    submitBtn.style.fontSize = "13.5px";
+    submitBtn.textContent = "Submit to leaderboard";
+    submitBtn.addEventListener("click", function(){ submitToLeaderboard(avgScore); });
+    var viewLbBtn = document.createElement("button");
+    viewLbBtn.className = "ghost-btn";
+    viewLbBtn.textContent = "View leaderboard";
+    viewLbBtn.addEventListener("click", function(){ showLeaderboard(); });
+    var startOver = document.createElement("button");
+    startOver.className = "ghost-btn";
+    startOver.textContent = "Start over with a new lamp";
+    startOver.addEventListener("click", resetAll);
+    actionsWrap.appendChild(submitBtn);
+    actionsWrap.appendChild(viewLbBtn);
+    actionsWrap.appendChild(startOver);
+    recapEl.appendChild(actionsWrap);
+  }
+
+  function resetAll(){
+    wishesUsed = 0;
+    wishHistory = [];
+    localStorage.setItem("genie_wishes_used", "0");
+    localStorage.setItem("genie_wish_history", "[]");
+    recapEl.hidden = true;
+    leaderboardEl.hidden = true;
+    genieResponse.hidden = true;
+    wishForm.hidden = false;
+    wishInput.value = "";
+    charCount.textContent = "280 left";
+    renderWishCounter();
+    setFormEnabled(true);
+    wishInput.focus();
+  }
+
+  /* ---------------- leaderboard ---------------- */
+  function fetchSeedLeaderboard(){
+    if (seedLeaderboard.length) return Promise.resolve(seedLeaderboard);
+    return fetch("data.json").then(function(res){
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    }).then(function(data){
+      seedLeaderboard = Array.isArray(data) ? data : (data.leaderboard || []);
+      return seedLeaderboard;
+    }).catch(function(){
+      seedLeaderboard = [];
+      return seedLeaderboard;
+    });
+  }
+
+  function combinedLeaderboard(){
+    var all = seedLeaderboard.concat(localLeaderboard);
+    // de-dupe by id, local copies win (they're the freshest)
+    var byId = {};
+    all.forEach(function(e){ byId[e.id || (e.name + e.score + e.date)] = e; });
+    var list = Object.keys(byId).map(function(k){ return byId[k]; });
+    list.sort(function(a, b){ return (b.score || 0) - (a.score || 0); });
+    return list.slice(0, 30);
+  }
+
+  function renderLeaderboard(){
+    lbList.innerHTML = "";
+    var list = combinedLeaderboard();
+    if (!list.length) {
+      var empty = document.createElement("p");
+      empty.className = "lb-empty";
+      empty.textContent = "No wishes on record yet. Be the first to get cursed.";
+      lbList.appendChild(empty);
+      return;
+    }
+    list.forEach(function(entry, i){
+      var row = document.createElement("div");
+      row.className = "lb-row" + (entry.id === lastEntryId ? " lb-mine" : "");
+      var rank = document.createElement("div");
+      rank.className = "lb-rank";
+      rank.textContent = "#" + (i + 1);
+      var nameWrap = document.createElement("div");
+      nameWrap.className = "lb-name";
+      var topWish = (entry.wishes && entry.wishes[0] && entry.wishes[0].wish) || entry.prompt || "";
+      nameWrap.innerHTML = escapeHtml(entry.name || "Anonymous Wisher") +
+        (topWish ? '<span class="lb-wish-preview">\u201c' + escapeHtml(topWish) + '\u201d</span>' : "");
+      var score = document.createElement("div");
+      score.className = "lb-score";
+      score.textContent = (entry.score != null ? entry.score : "—");
+      row.appendChild(rank);
+      row.appendChild(nameWrap);
+      row.appendChild(score);
+      lbList.appendChild(row);
+    });
+  }
+
+  function showLeaderboard(){
+    wishForm.hidden = true;
+    genieResponse.hidden = true;
+    recapEl.hidden = true;
+    leaderboardEl.hidden = false;
+    lbLoading.hidden = false;
+    fetchSeedLeaderboard().then(function(){
+      lbLoading.hidden = true;
+      renderLeaderboard();
+    });
+  }
+
+  function buildLeaderboardEntry(avgScore){
+    return {
+      id: "w" + Date.now() + Math.floor(Math.random() * 1000),
+      name: getWisherName(),
+      score: avgScore,
+      date: new Date().toISOString().slice(0, 10),
+      wishes: wishHistory.map(function(h){
+        return { wish: h.wish, loophole: h.loophole, proof: h.proof, outcome: h.outcome, score: h.score };
+      })
+    };
+  }
+
+  function submitToLeaderboard(avgScore){
+    var entry = buildLeaderboardEntry(avgScore);
+    localLeaderboard.push(entry);
+    localStorage.setItem("genie_leaderboard", JSON.stringify(localLeaderboard));
+    lastEntryId = entry.id;
+
+    submitJson.value = JSON.stringify(entry, null, 2);
+    submitOverlay.hidden = false;
+
+    var issueBtn = $("openIssueBtn");
+    if (GITHUB_REPO) {
+      issueBtn.hidden = false;
+      issueBtn.onclick = function(){
+        var title = encodeURIComponent("Leaderboard entry: " + entry.name + " (" + entry.score + ")");
+        var body = encodeURIComponent("Add this entry to data.json:\n\n```json\n" + JSON.stringify(entry, null, 2) + "\n```");
+        window.open("https://github.com/" + GITHUB_REPO + "/issues/new?title=" + title + "&body=" + body, "_blank");
+      };
+    } else {
+      issueBtn.hidden = true;
+    }
+  }
+
+  $("copyJsonBtn").addEventListener("click", function(){
+    submitJson.select();
+    try { document.execCommand("copy"); } catch(e) {}
+    if (navigator.clipboard) { navigator.clipboard.writeText(submitJson.value).catch(function(){}); }
+    $("copyJsonBtn").textContent = "Copied!";
+    setTimeout(function(){ $("copyJsonBtn").textContent = "Copy entry"; }, 1500);
+  });
+  $("closeSubmit").addEventListener("click", function(){
+    submitOverlay.hidden = true;
+    showLeaderboard();
+  });
+  submitOverlay.addEventListener("click", function(e){ if (e.target === submitOverlay) { submitOverlay.hidden = true; showLeaderboard(); } });
+
+  /* ---------------- main flow ---------------- */
+  rubBtn.addEventListener("click", function(){
+    var wishText = wishInput.value.trim();
+    if (!wishText || wishesUsed >= MAX_WISHES) return;
+
+    if (!getApiKey()) {
+      openSettings();
+      return;
+    }
+
+    setFormEnabled(false);
+    lampWrap.classList.add("rubbing");
+    showLoading();
+
+    callGenie(wishText).then(function(result){
+      stopLoading();
+      lampWrap.classList.remove("rubbing");
+
+      wishesUsed += 1;
+      wishHistory.push({ wish: wishText, loophole: result.loophole, proof: result.proof, outcome: result.outcome, verdict: result.verdict, score: result.score });
+      localStorage.setItem("genie_wishes_used", String(wishesUsed));
+      localStorage.setItem("genie_wish_history", JSON.stringify(wishHistory));
+
+      renderWishCounter();
+      showResult(wishText, result);
+
+      if (wishesUsed >= MAX_WISHES) {
+        wishForm.hidden = true;
+      } else {
+        setFormEnabled(true);
+      }
+    }).catch(function(err){
+      stopLoading();
+      lampWrap.classList.remove("rubbing");
+      setFormEnabled(true);
+      var msg = err && err.message ? err.message : "Something went wrong talking to the genie.";
+      showError(msg);
+    });
+  });
+
+  /* ---------------- init ---------------- */
+  if (GITHUB_REPO) {
+    $("viewSourceLink").href = "https://github.com/" + GITHUB_REPO;
+  }
+  refreshKeyPill();
+  renderWishCounter();
+  setFormEnabled(true);
+  rubBtn.disabled = true;
+
+  if (wishesUsed >= MAX_WISHES) {
+    showRecap();
+  }
+})();
+</script>
+</body>
+</html>
