@@ -698,15 +698,25 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
   var GITHUB_BRANCH = "main";
   var GITHUB_DATA_PATH = "data.json";
 
-  // ⚠️ See the big warning comment at the top of this file before setting
-  // this. A fine-grained PAT scoped to ONLY this repo, with ONLY the
-  // "Contents: Read and write" permission. Leave "" to disable direct
-  // writes (submissions then stay local-only, per visitor).
-  var GITHUB_TOKEN = "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";
+  // ── SUPABASE CONFIGURATION ──────────────────────────────────────────────────
+  // Fill in all three values. None of these expose your Anthropic key.
+  //
+  // SUPABASE_PROXY_URL  — your deployed genie-proxy Edge Function URL.
+  //   e.g. "https://vpysolidahgvaxexowak.supabase.co/functions/v1/genie-proxy"
+  //   The Anthropic key lives in Supabase Secrets, NOT in this file.
+  //
+  // SUPABASE_URL / SUPABASE_ANON_KEY — for the live leaderboard table.
+  //   The anon key is safe to embed (public read/insert only via RLS policy).
+  var SUPABASE_PROXY_URL = "https://vpysolidahgvaxexowak.supabase.co/functions/v1/genie-proxy";
+  var SUPABASE_URL       = "https://vpysolidahgvaxexowak.supabase.co";
+  var SUPABASE_ANON_KEY  = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZweXNvbGlkYWhndmF4ZXhvd2FrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI2ODUyNzMsImV4cCI6MjA5ODI2MTI3M30.mhzi-JeEbJI9dywXha46ftdGn2Zfy74q6rYi9yYIbCQ";
 
-  // OPTIONAL "default" key so visitors don't have to bring their own.
-  // ⚠️ This is a public static file — anyone who views source can see this key.
-  // Set a hard spending limit on the key before using it here.
+  // GitHub token no longer needed — leaderboard is now handled by Supabase.
+  var GITHUB_TOKEN = "";
+
+  // Default API keys removed — Anthropic calls go through the secure proxy above.
+  // Other providers (Groq, OpenRouter, Gemini) still require visitors to paste
+  // their own key via the gear icon, or you can add keys back here (public!).
   var DEFAULT_API_KEYS = {
     groq: "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",
     openrouter: "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",
@@ -1385,16 +1395,21 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
     }
   }
 
-  // Anthropic native API
+  // Anthropic — routes through Supabase proxy (key stays server-side) when
+  // SUPABASE_PROXY_URL is set, otherwise falls back to a direct browser call
+  // using the visitor's own key from the settings modal.
   function callAnthropic(wishText, apiKey, model){
-    return fetch("https://api.anthropic.com/v1/messages", {
+    var url = SUPABASE_PROXY_URL || "https://api.anthropic.com/v1/messages";
+    var headers = { "content-type": "application/json" };
+    if (!SUPABASE_PROXY_URL) {
+      // Direct call — need the visitor's key and Anthropic CORS header
+      headers["x-api-key"] = apiKey;
+      headers["anthropic-version"] = "2023-06-01";
+      headers["anthropic-dangerous-direct-browser-access"] = "true";
+    }
+    return fetch(url, {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true"
-      },
+      headers: headers,
       body: JSON.stringify({
         model: model,
         max_tokens: 400,
@@ -1729,31 +1744,43 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
     renderLeaderboard();
   }
 
-  /* ---------------- leaderboard — read from GitHub ---------------- */
-  // The shared leaderboard is just data.json in the repo. Read it straight
-  // from the raw GitHub CDN (public, no token needed, cache-busted) on
-  // every page load / refresh.
+  /* ---------------- leaderboard — read from Supabase ---------------- */
+  function supabaseHeaders(){
+    return {
+      "Content-Type": "application/json",
+      "apikey": SUPABASE_ANON_KEY,
+      "Authorization": "Bearer " + SUPABASE_ANON_KEY
+    };
+  }
 
   function fetchSeedLeaderboard(){
-    if (!GITHUB_REPO) {
+    lbLoading.hidden = false;
+    var promise;
+    if (SUPABASE_URL && SUPABASE_ANON_KEY) {
+      promise = fetch(
+        SUPABASE_URL + "/rest/v1/leaderboard?select=id,name,score,date,wishes&order=score.desc&limit=20",
+        { headers: supabaseHeaders() }
+      ).then(function(res){
+        if (!res.ok) throw new Error("Supabase fetch failed: " + res.status);
+        return res.json();
+      }).catch(function(err){
+        console.warn("Supabase leaderboard fetch failed, falling back to data.json:", err);
+        var url = "https://raw.githubusercontent.com/" + GITHUB_REPO + "/" + GITHUB_BRANCH + "/" + GITHUB_DATA_PATH + "?_=" + Date.now();
+        return fetch(url).then(function(r){ return r.ok ? r.json() : []; }).catch(function(){ return []; });
+      });
+    } else {
+      // No Supabase — fall back to data.json
+      var url = "https://raw.githubusercontent.com/" + GITHUB_REPO + "/" + GITHUB_BRANCH + "/" + GITHUB_DATA_PATH + "?_=" + Date.now();
+      promise = fetch(url).then(function(r){ return r.ok ? r.json() : []; }).catch(function(){ return []; });
+    }
+    promise.then(function(seeds){
+      seedLeaderboard = Array.isArray(seeds) ? seeds : [];
+    }).catch(function(){
+      seedLeaderboard = [];
+    }).then(function(){
       lbLoading.hidden = true;
       renderLeaderboard();
-      return;
-    }
-    lbLoading.hidden = false;
-    var url = "https://raw.githubusercontent.com/" + GITHUB_REPO + "/" + GITHUB_BRANCH + "/" + GITHUB_DATA_PATH + "?_=" + Date.now();
-    fetch(url)
-      .then(function(r){ return r.ok ? r.json() : []; })
-      .then(function(seeds){
-        seedLeaderboard = Array.isArray(seeds) ? seeds : [];
-      })
-      .catch(function(){
-        seedLeaderboard = [];
-      })
-      .then(function(){
-        lbLoading.hidden = true;
-        renderLeaderboard();
-      });
+    });
   }
 
   function renderLeaderboard(){
@@ -1788,102 +1815,25 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
     });
   }
 
-  /* ---------------- leaderboard — commit to GitHub ---------------- */
-  // UTF-8-safe base64 helpers (plain btoa/atob only handle Latin-1, and
-  // wishes/outcomes can contain emoji, smart quotes, etc.)
-  function utf8ToBase64(str){
-    return btoa(unescape(encodeURIComponent(str)));
-  }
-  function base64ToUtf8(str){
-    return decodeURIComponent(escape(atob(str.replace(/\s/g, ""))));
-  }
-
-  function githubApiHeaders(){
-    // "token <PAT>" is the format GitHub's CORS policy allows from browsers.
-    // "X-GitHub-Api-Version" is intentionally omitted: it triggers a CORS
-    // preflight that GitHub does not approve for browser-side requests, causing
-    // the browser to block the call before the token is even sent.
-    return {
-      "Accept": "application/vnd.github+json",
-      "Authorization": "token " + GITHUB_TOKEN
-    };
-  }
-
-  // GETs the current data.json straight from the API (not the raw CDN) so
-  // we get back the blob `sha` GitHub requires to commit an update, and so
-  // an authenticated request isn't served stale from cache.
-  function fetchDataJsonForWrite(){
-    var url = "https://api.github.com/repos/" + GITHUB_REPO + "/contents/" + GITHUB_DATA_PATH + "?ref=" + encodeURIComponent(GITHUB_BRANCH);
-    return fetch(url, { headers: githubApiHeaders() }).then(function(res){
-      if (!res.ok) {
-        return res.json().catch(function(){ return {}; }).then(function(body){
-          var err = new Error((body && body.message) || ("GitHub returned HTTP " + res.status));
-          err.status = res.status;
-          throw err;
-        });
-      }
-      return res.json();
-    }).then(function(file){
-      var list = [];
-      try { list = JSON.parse(base64ToUtf8(file.content || "")); } catch(e) { list = []; }
-      if (!Array.isArray(list)) list = [];
-      return { list: list, sha: file.sha };
-    });
-  }
-
-  function commitDataJson(list, sha, message){
-    var url = "https://api.github.com/repos/" + GITHUB_REPO + "/contents/" + GITHUB_DATA_PATH;
-    var body = {
-      message: message,
-      content: utf8ToBase64(JSON.stringify(list, null, 2)),
-      sha: sha,
-      branch: GITHUB_BRANCH
-    };
-    return fetch(url, {
-      method: "PUT",
-      headers: Object.assign({ "content-type": "application/json" }, githubApiHeaders()),
-      body: JSON.stringify(body)
+  /* ---------------- leaderboard — submit to Supabase ---------------- */
+  function submitToSupabase(entry){
+    return fetch(SUPABASE_URL + "/rest/v1/leaderboard", {
+      method: "POST",
+      headers: Object.assign({}, supabaseHeaders(), { "Prefer": "return=representation" }),
+      body: JSON.stringify({
+        name:   entry.name,
+        score:  entry.score,
+        date:   entry.date,
+        wishes: entry.wishes
+      })
     }).then(function(res){
       if (!res.ok) {
         return res.json().catch(function(){ return {}; }).then(function(errBody){
-          var err = new Error((errBody && errBody.message) || ("GitHub returned HTTP " + res.status));
-          err.status = res.status;
-          throw err;
+          throw new Error(JSON.stringify(errBody) || ("Supabase returned HTTP " + res.status));
         });
       }
       return res.json();
     });
-  }
-
-  // Reads data.json, prepends the new entry (replacing any earlier entry
-  // with the same id), caps the file at 200 entries, and commits it back.
-  // Retries a couple of times on 409 (someone else committed data.json in
-  // between our GET and PUT) by simply re-fetching the latest sha.
-  async function submitToGitHub(entry){
-    if (!GITHUB_TOKEN) {
-      throw new Error("No GitHub token configured for this site — ask the site owner to set GITHUB_TOKEN. Your score is saved locally on this device only.");
-    }
-    if (!GITHUB_REPO) {
-      throw new Error("No GitHub repo configured (GITHUB_REPO is blank).");
-    }
-
-    var attempts = 0;
-    var maxAttempts = 3;
-    while (attempts < maxAttempts) {
-      attempts++;
-      try {
-        var current = await fetchDataJsonForWrite();
-        var list = current.list.filter(function(e){ return e && e.id !== entry.id; });
-        list.unshift(entry);
-        if (list.length > 200) list = list.slice(0, 200);
-        await commitDataJson(list, current.sha, "Add leaderboard entry: " + entry.name + " (" + entry.score + ")");
-        return;
-      } catch (err) {
-        var canRetry = err && err.status === 409 && attempts < maxAttempts;
-        if (!canRetry) throw err;
-        // fall through and loop again with a fresh GET
-      }
-    }
   }
 
   function openSubmitModal(avgScore){
@@ -1904,8 +1854,7 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
     };
     lastEntryId = entry.id;
 
-    // Save locally first, regardless of whether the GitHub commit below
-    // succeeds — the visitor should always see their own entry on this device.
+    // Save locally first — visitor always sees their own run immediately.
     var existingLocal = localLeaderboard.filter(function(e){ return e.id !== entry.id; });
     existingLocal.unshift(entry);
     localLeaderboard = existingLocal;
@@ -1919,7 +1868,7 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
     statusEl.style.display = "none";
     statusEl.textContent = "";
     actionBtns.hidden = false;
-    subEl.textContent = "Your score of " + avgScore + " will be committed to this site's leaderboard on GitHub so all visitors can see it.";
+    subEl.textContent = "Your score of " + avgScore + " will be added to the shared leaderboard so all visitors can see it.";
 
     submitOverlay.hidden = false;
 
@@ -1928,13 +1877,16 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
       $("confirmSubmitBtn").textContent = "Saving…";
 
       try {
-        await submitToGitHub(entry);
+        if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+          throw new Error("No leaderboard backend configured — your score is saved locally on this device only.");
+        }
+        await submitToSupabase(entry);
         actionBtns.hidden = true;
         statusEl.style.display = "block";
         statusEl.style.color = "var(--glitch)";
         statusEl.style.background = "rgba(92,230,160,0.08)";
         statusEl.style.border = "1px solid var(--glitch-dim)";
-        statusEl.innerHTML = '<div style="font-size:28px;margin-bottom:8px;">✅</div>Score committed to the shared leaderboard!';
+        statusEl.innerHTML = '<div style="font-size:28px;margin-bottom:8px;">✅</div>Score added to the shared leaderboard!';
         subEl.textContent = "Other visitors will now see your entry.";
         // Refresh leaderboard in background
         fetchSeedLeaderboard();
@@ -1990,3 +1942,5 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
 </html>
 index - 2026-06-28T205600.763.html
 Displaying index - 2026-06-28T205600.763.html.
+index - 2026-06-29T104928.285.html
+Displaying index - 2026-06-29T104928.285.html.
