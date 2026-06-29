@@ -1799,10 +1799,13 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
   }
 
   function githubApiHeaders(){
+    // "token <PAT>" is the format GitHub's CORS policy allows from browsers.
+    // "X-GitHub-Api-Version" is intentionally omitted: it triggers a CORS
+    // preflight that GitHub does not approve for browser-side requests, causing
+    // the browser to block the call before the token is even sent.
     return {
       "Accept": "application/vnd.github+json",
-      "Authorization": "Bearer " + GITHUB_TOKEN,
-      "X-GitHub-Api-Version": "2022-11-28"
+      "Authorization": "token " + GITHUB_TOKEN
     };
   }
 
@@ -1985,5 +1988,5 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
 </script>
 </body>
 </html>
-index - 2026-06-28T201959.921.html
-Displaying index - 2026-06-28T201959.921.html.
+index - 2026-06-28T205600.763.html
+Displaying index - 2026-06-28T205600.763.html.
