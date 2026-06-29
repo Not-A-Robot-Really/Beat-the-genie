@@ -702,7 +702,7 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
   // this. A fine-grained PAT scoped to ONLY this repo, with ONLY the
   // "Contents: Read and write" permission. Leave "" to disable direct
   // writes (submissions then stay local-only, per visitor).
-  var GITHUB_TOKEN = "";
+  var GITHUB_TOKEN = "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";
 
   // OPTIONAL "default" key so visitors don't have to bring their own.
   // ⚠️ This is a public static file — anyone who views source can see this key.
@@ -1967,13 +1967,23 @@ textarea#wishInput:focus{ outline:none; border-color:var(--glitch); box-shadow:0
   // Enable the button correctly: disabled if no text OR all wishes used
   rubBtn.disabled = wishInput.value.trim().length === 0 || wishesUsed >= MAX_WISHES;
   if (wishesUsed >= MAX_WISHES) { wishInput.disabled = true; }
-  wishInput.focus();
   fetchSeedLeaderboard();
   renderLeaderboard();
+
+  // wishesUsed/wishHistory live in localStorage, which is shared across
+  // every tab on this origin. So if all 3 wishes were already used up in
+  // another tab (or an earlier visit), a freshly opened tab would otherwise
+  // land on the wish page with a permanently disabled "Rub the lamp" button
+  // and no way forward. Send it straight to the recap instead.
+  if (wishesUsed >= MAX_WISHES) {
+    showRecap();
+  } else {
+    wishInput.focus();
+  }
 
 })();
 </script>
 </body>
 </html>
-index - 2026-06-28T195429.231.html
-Displaying index - 2026-06-28T195429.231.html.
+index - 2026-06-28T201700.925.html
+Displaying index - 2026-06-28T201700.925.html.
